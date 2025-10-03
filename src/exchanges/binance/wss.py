@@ -22,6 +22,8 @@ class BinancePriceStream:
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 5
         self.reconnect_delay = 5
+        self._shutdown_lock = threading.Lock()
+        self._reconnect_lock = threading.Lock()
 
     def start(self):
         """Запуск потока цен"""
@@ -35,17 +37,33 @@ class BinancePriceStream:
 
     def stop(self):
         """Остановка потока цен"""
-        logger.info(f"Остановка потока цен для {self.symbol}")
-        self.is_running = False
+        with self._shutdown_lock:
+            if not self.is_running:
+                return
 
-        if self.ws:
-            self.ws.close()
+            logger.info(f"Остановка потока цен для {self.symbol}")
+            self.is_running = False
 
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=5)
+            if self.ws:
+                try:
+                    self.ws.close()
+                except Exception as e:
+                    logger.error(f"Ошибка при закрытии WebSocket для {self.symbol}: {e}")
+                finally:
+                    self.ws = None
+
+            if self.thread and self.thread.is_alive():
+                self.thread.join(timeout=5)
+                if self.thread.is_alive():
+                    logger.warning(f"Поток {self.symbol} не завершился за 5 секунд")
+
+            logger.info(f"Поток цен для {self.symbol} остановлен")
 
     def _connect(self):
         """Создает WebSocket соединение"""
+        if not self.is_running:
+            return
+
         url = f"wss://fstream.binance.com/ws/{self.symbol}@ticker"
 
         self.ws = websocket.WebSocketApp(
@@ -67,7 +85,7 @@ class BinancePriceStream:
         """Запускает WebSocket в отдельном потоке"""
         while self.is_running:
             try:
-                if self.ws:
+                if self.ws and self.is_running:
                     self.ws.run_forever(
                         ping_interval=20,
                         ping_timeout=10
@@ -75,8 +93,11 @@ class BinancePriceStream:
             except Exception as e:
                 if self.is_running:
                     logger.error(f"Ошибка WebSocket для {self.symbol}: {e}")
-                    self._handle_reconnect()
+
+            if not self.is_running:
                 break
+
+            time.sleep(1)
 
     def _on_message(self, _, message):
         """Обработчик входящих сообщений"""
@@ -124,20 +145,29 @@ class BinancePriceStream:
 
     def _handle_reconnect(self):
         """Обработка переподключения"""
-        if not self.is_running:
-            return
+        with self._reconnect_lock:
+            if not self.is_running:
+                return
 
-        self.reconnect_attempts += 1
+            self.reconnect_attempts += 1
 
-        if self.reconnect_attempts > self.max_reconnect_attempts:
-            logger.error(f"Превышено максимальное количество попыток переподключения для {self.symbol}")
-            self.is_running = False
-            return
+            if self.reconnect_attempts > self.max_reconnect_attempts:
+                logger.error(f"Превышено максимальное количество попыток переподключения для {self.symbol}")
+                self.is_running = False
+                return
 
-        logger.info(f"Попытка переподключения #{self.reconnect_attempts} для {self.symbol} "
-                    f"через {self.reconnect_delay} секунд")
+            logger.info(f"Попытка переподключения #{self.reconnect_attempts} для {self.symbol} "
+                        f"через {self.reconnect_delay} секунд")
 
-        time.sleep(self.reconnect_delay)
+            time.sleep(self.reconnect_delay)
 
-        if self.is_running:
-            self._connect()
+            if self.is_running:
+                if self.ws:
+                    try:
+                        self.ws.close()
+                    except (OSError, RuntimeError, websocket.WebSocketException) as e:
+                        logger.debug(f"Ошибка при закрытии WS перед переподключением: {e}")
+                    self.ws = None
+
+                time.sleep(1)
+                self._connect()

@@ -2,6 +2,7 @@
 
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
+import threading
 from src.utils.logger import get_logger
 from src.config.manager import config_manager
 
@@ -16,7 +17,7 @@ class PendingStop:
     activation_price: float
     stop_price: float
     limit_price: float
-    position_side: str  # 'Buy' or 'Sell'
+    position_side: str
 
 
 @dataclass
@@ -28,7 +29,7 @@ class ActiveStop:
     activation_price: float
     stop_price: float
     limit_price: float
-    position_side: str  # 'Buy' or 'Sell'
+    position_side: str
 
 
 class StopManager:
@@ -39,8 +40,9 @@ class StopManager:
         self.active_stop: Optional[ActiveStop] = None
         self.monitoring_active = False
         self.pending_stop: Optional[PendingStop] = None
-
         self.leverage = exchange_client.leverage
+        self._placement_lock = threading.Lock()
+        self._is_placing_order = False
 
     def start_monitoring(self, symbol: str, entry_price: float, position_side: str):
         """
@@ -70,6 +72,7 @@ class StopManager:
             stop_price = limit_price - 1
 
         self.monitoring_active = True
+        self._is_placing_order = False
 
         logger.info(
             f"Запуск мониторинга трейлинг стопа: Цена входа: ${entry_price:.2f}. "
@@ -97,6 +100,9 @@ class StopManager:
         if not self.monitoring_active or self.active_stop or not self.pending_stop:
             return
 
+        if self._is_placing_order:
+            return
+
         activation_price = self.pending_stop.activation_price
         position_side = self.pending_stop.position_side
 
@@ -107,6 +113,12 @@ class StopManager:
             should_activate = True
 
         if should_activate:
+            with self._placement_lock:
+                if self._is_placing_order or self.active_stop:
+                    return
+
+                self._is_placing_order = True
+
             logger.info(f"Цена достигла активации {activation_price:.2f}, размещаем стоп ордер")
             self._place_stop_order(self.pending_stop)
 
@@ -150,6 +162,8 @@ class StopManager:
 
         except Exception as e:
             logger.error(f"Ошибка размещения стоп ордера: {e}")
+        finally:
+            self._is_placing_order = False
 
     def cancel_active_stop(self):
         """Отменяет активный стоп ордер"""
@@ -174,11 +188,13 @@ class StopManager:
 
         self.monitoring_active = False
         self.pending_stop = None
+        self._is_placing_order = False
 
     def stop_monitoring(self):
         """Останавливает мониторинг без отмены ордеров"""
         self.monitoring_active = False
         self.pending_stop = None
+        self._is_placing_order = False
         logger.info("Мониторинг трейлинг стопа остановлен")
 
     def has_active_stop(self) -> bool:

@@ -1,6 +1,7 @@
 # src/server/app.py
 
 import socket
+import asyncio
 from typing import Set, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends
@@ -95,6 +96,8 @@ async def cleanup_app():
             app_state.strategy.cleanup()
             logger.info("Ресурсы стратегии корректно завершены")
             app_state.strategy = None
+
+        await asyncio.sleep(0.5)
 
         logger.info("Все ресурсы приложения успешно очищены")
 

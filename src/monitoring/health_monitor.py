@@ -158,8 +158,7 @@ class HealthMonitor:
 
         try:
             if self._is_time_for_midnight_restart():
-                logger.info("Время для ежедневного перезапуска в полночь")
-                self._trigger_restart({"problems": ["Ежедневный перезапуск в полночь"]})
+                self._trigger_midnight_restart()
                 return
 
             if self._should_perform_self_test():
@@ -184,9 +183,7 @@ class HealthMonitor:
                     hours_until_midnight = (next_midnight - datetime.now()).total_seconds() / 3600
 
                     logger.info(f"Сервер здоров. Uptime: {status['uptime_seconds'] / 3600:.1f}ч, "
-                                f"Memory: {status['memory_mb']}MB, Requests: {status['request_count']}, "
-                                f"Self-test failures: {status['self_test_failures']}, "
-                                f"До перезапуска: {hours_until_midnight:.1f}ч")
+                                f"до перезапуска: {hours_until_midnight:.1f}ч")
 
         except Exception as e:
             self.consecutive_failures += 1
@@ -248,6 +245,19 @@ class HealthMonitor:
 
         return any(critical_conditions)
 
+    def _trigger_midnight_restart(self):
+        """Запускает плановый перезапуск в полночь"""
+        logger.info("=== ИНИЦИИРОВАН ПЛАНОВЫЙ ПЕРЕЗАПУСК ПРИЛОЖЕНИЯ ===")
+
+        if self.restart_callback:
+            try:
+                self.is_monitoring = False
+                self.restart_callback()
+            except Exception as e:
+                logger.error(f"Ошибка при выполнении перезапуска: {e}")
+        else:
+            logger.critical("Callback для перезапуска не установлен!")
+
     def _trigger_restart(self, status: Dict[str, Any]):
         """Запускает процедуру перезапуска"""
         logger.critical("=== ИНИЦИИРОВАН ПЕРЕЗАПУСК СЕРВЕРА ===")
@@ -259,8 +269,7 @@ class HealthMonitor:
         if self.restart_callback:
             try:
                 self.is_monitoring = False
-                reason = "Midnight restart" if "полночь" in str(status.get('problems', [])) else "Health check failure"
-                self.restart_callback(reason)
+                self.restart_callback()
             except Exception as e:
                 logger.error(f"Ошибка при выполнении перезапуска: {e}")
         else:

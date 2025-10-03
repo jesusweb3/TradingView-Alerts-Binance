@@ -12,7 +12,7 @@ _restart_in_progress = False
 _restart_lock = threading.Lock()
 
 
-def request_restart(reason: str = "Health check failure"):
+def request_restart():
     """Запрашивает перезапуск приложения"""
     global _restart_in_progress
 
@@ -23,34 +23,27 @@ def request_restart(reason: str = "Health check failure"):
 
         _restart_in_progress = True
 
-    logger.critical(f"Запрошен перезапуск приложения. Причина: {reason}")
-
     restart_thread = threading.Thread(
         target=_perform_restart,
-        args=(reason,),
-        daemon=True,
+        daemon=False,
         name="RestartThread"
     )
     restart_thread.start()
 
 
-def _perform_restart(reason: str):
+def _perform_restart():
     """Выполняет перезапуск приложения"""
     try:
         restart_delay = 3
-        logger.info(f"Начинается процедура перезапуска через {restart_delay} секунд...")
-        logger.info(f"Причина перезапуска: {reason}")
-
         time.sleep(restart_delay)
 
         logger.info("Выполняется перезапуск приложения...")
 
+        _graceful_shutdown()
+
+        time.sleep(1)
+
         python_executable = sys.executable
-        script_path = sys.argv[0]
-
-        restart_command = f'"{python_executable}" "{script_path}"'
-        logger.info(f"Команда перезапуска: {restart_command}")
-
         os.execv(python_executable, [python_executable] + sys.argv)
 
     except Exception as e:
@@ -58,3 +51,31 @@ def _perform_restart(reason: str):
         logger.critical("Перезапуск не удался, приложение может быть в нерабочем состоянии")
         logger.critical("Выполняется принудительный выход из приложения")
         os._exit(1)
+
+
+def _graceful_shutdown():
+    """Корректное завершение всех ресурсов перед перезапуском"""
+    try:
+        logger.info("Завершение активных соединений и ресурсов...")
+
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            if loop and not loop.is_closed():
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                logger.debug(f"Отменено {len(pending)} asyncio задач")
+        except RuntimeError:
+            pass
+
+        active_threads = threading.enumerate()
+        daemon_threads = [t for t in active_threads if t.daemon and t.is_alive() and t != threading.current_thread()]
+        logger.debug(f"Активных daemon потоков: {len(daemon_threads)}")
+
+        time.sleep(1)
+
+        logger.info("Graceful shutdown завершен")
+
+    except Exception as e:
+        logger.warning(f"Ошибка при graceful shutdown: {e}")

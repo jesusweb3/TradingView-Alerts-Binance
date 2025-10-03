@@ -1,6 +1,7 @@
 # src/strategies/strategy.py
 
 from typing import Optional, Literal
+import threading
 from src.utils.logger import get_logger
 from src.config.manager import config_manager
 from src.exchanges.binance.api import BinanceClient
@@ -31,6 +32,7 @@ class Strategy:
 
         self.last_action: Optional[Action] = None
         self.current_price: Optional[float] = None
+        self._price_lock = threading.Lock()
 
         self.trailing_stop = StopManager(self.exchange)
 
@@ -47,7 +49,9 @@ class Strategy:
             price: Текущая цена актива
         """
         try:
-            self.current_price = price
+            with self._price_lock:
+                self.current_price = price
+
             self.trailing_stop.check_price_and_activate(price)
         except Exception as e:
             logger.error(f"Ошибка обработки обновления цены {price}: {e}")
@@ -290,18 +294,21 @@ class Strategy:
 
     def _open_new_position(self, action: Action, normalized_symbol: str, position_size: float) -> bool:
         """Открывает новую позицию используя цену из WebSocket"""
-        if self.current_price is None:
+        with self._price_lock:
+            current_price = self.current_price
+
+        if current_price is None:
             logger.error("Цена из WebSocket недоступна")
             return False
 
         if action == "buy":
             success = self.exchange.open_long_position(
-                normalized_symbol, position_size, self.current_price
+                normalized_symbol, position_size, current_price
             )
             direction = "Long"
         else:
             success = self.exchange.open_short_position(
-                normalized_symbol, position_size, self.current_price
+                normalized_symbol, position_size, current_price
             )
             direction = "Short"
 
@@ -331,25 +338,30 @@ class Strategy:
     def cleanup(self):
         """Очистка ресурсов при завершении стратегии"""
         try:
+            logger.info("Начинается очистка ресурсов стратегии...")
+
             if self.price_stream:
                 self.price_stream.stop()
-                logger.info("Поток цен остановлен")
 
             if self.trailing_stop:
                 self.trailing_stop.stop_monitoring()
-                logger.info("Мониторинг трейлинг стопа остановлен")
+
+            logger.info("Очистка ресурсов стратегии завершена")
 
         except Exception as e:
             logger.error(f"Ошибка при очистке ресурсов стратегии: {e}")
 
     def get_status(self) -> dict:
         """Возвращает текущий статус стратегии"""
+        with self._price_lock:
+            current_price = self.current_price
+
         status = {
             'exchange': self.exchange.name,
             'symbol': self.symbol,
             'last_action': self.last_action,
             'price_stream_active': self.price_stream.is_running if self.price_stream else False,
-            'current_price': self.current_price
+            'current_price': current_price
         }
 
         if self.trailing_stop:
