@@ -24,6 +24,7 @@ class BinancePriceStream:
         self.reconnect_delay = 5
         self._shutdown_lock = threading.Lock()
         self._reconnect_lock = threading.Lock()
+        self._ws_running = False
 
     def start(self):
         """Запуск потока цен"""
@@ -43,6 +44,7 @@ class BinancePriceStream:
 
             logger.info(f"Остановка потока цен для {self.symbol}")
             self.is_running = False
+            self._ws_running = False
 
             if self.ws:
                 try:
@@ -74,6 +76,7 @@ class BinancePriceStream:
             on_open=self._on_open
         )
 
+        self._ws_running = True
         self.thread = threading.Thread(
             target=self._run_websocket,
             daemon=True,
@@ -83,9 +86,9 @@ class BinancePriceStream:
 
     def _run_websocket(self):
         """Запускает WebSocket в отдельном потоке"""
-        while self.is_running:
+        while self.is_running and self._ws_running:
             try:
-                if self.ws and self.is_running:
+                if self.ws and self.is_running and self._ws_running:
                     self.ws.run_forever(
                         ping_interval=20,
                         ping_timeout=10
@@ -94,7 +97,7 @@ class BinancePriceStream:
                 if self.is_running:
                     logger.error(f"Ошибка WebSocket для {self.symbol}: {e}")
 
-            if not self.is_running:
+            if not self.is_running or not self._ws_running:
                 break
 
             time.sleep(1)
@@ -159,15 +162,19 @@ class BinancePriceStream:
             logger.info(f"Попытка переподключения #{self.reconnect_attempts} для {self.symbol} "
                         f"через {self.reconnect_delay} секунд")
 
+            self._ws_running = False
+
+            if self.ws:
+                try:
+                    self.ws.close()
+                except Exception as e:
+                    logger.debug(f"Ошибка при закрытии WS перед переподключением: {e}")
+                self.ws = None
+
+            if self.thread and self.thread.is_alive():
+                self.thread.join(timeout=3)
+
             time.sleep(self.reconnect_delay)
 
             if self.is_running:
-                if self.ws:
-                    try:
-                        self.ws.close()
-                    except (OSError, RuntimeError, websocket.WebSocketException) as e:
-                        logger.debug(f"Ошибка при закрытии WS перед переподключением: {e}")
-                    self.ws = None
-
-                time.sleep(1)
                 self._connect()
