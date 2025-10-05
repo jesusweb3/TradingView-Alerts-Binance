@@ -31,11 +31,8 @@ class BinanceClient(QuantityCalculator):
     def initialize_symbol(self, symbol: str):
         """Инициализирует символ: устанавливает плечо и получает параметры"""
         self._setup_leverage(symbol)
-        info = self.get_instrument_info(symbol)
-        self.logger.info(
-            f"Актив {symbol} инициализирован: плечо {self.leverage}x, "
-            f"QtyStep={info.get('qty_step')}, MinQty={info.get('min_qty')}"
-        )
+        self.get_instrument_info(symbol)
+        self.logger.info(f"Актив {symbol} инициализирован: плечо {self.leverage}x")
 
     def _fetch_instrument_info(self, symbol: str) -> Dict[str, Any]:
         """Получает информацию об инструменте с Binance API"""
