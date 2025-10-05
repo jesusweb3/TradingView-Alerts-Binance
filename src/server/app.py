@@ -11,7 +11,6 @@ from src.utils.logger import get_logger
 from src.config.manager import config_manager
 from src.strategies.strategy import Strategy
 from src.monitoring.health_monitor import health_monitor
-from src.monitoring.restart_manager import request_restart
 
 logger = get_logger(__name__)
 
@@ -75,7 +74,6 @@ async def initialize_app():
 
         app.state.app_state = app_state  # type: ignore[attr-defined]
 
-        health_monitor.restart_callback = request_restart
         health_monitor.start_monitoring()
         logger.info("Мониторинг здоровья запущен")
 
@@ -91,7 +89,7 @@ async def cleanup_app():
 
         health_monitor.stop_monitoring()
 
-        app_state: AppState = app.state.app_state # type: ignore
+        app_state: AppState = app.state.app_state  # type: ignore
         if app_state.strategy:
             app_state.strategy.cleanup()
             logger.info("Ресурсы стратегии корректно завершены")
