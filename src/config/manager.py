@@ -2,7 +2,7 @@
 
 import os
 import json
-from typing import Optional, Any
+from typing import Optional, Any, List
 from functools import lru_cache
 from dotenv import load_dotenv
 from src.utils.logger import get_logger
@@ -164,6 +164,22 @@ class ConfigManager:
             'stop_percent': stop_percent
         }
 
+    @lru_cache(maxsize=1)
+    def get_telegram_config(self) -> dict:
+        """Возвращает конфигурацию Telegram с валидацией"""
+        bot_token = ConfigManager._validate_and_get('TELEGRAM_BOT_TOKEN', str, required=True)
+        chat_ids_raw = ConfigManager._validate_and_get('TELEGRAM_CHAT_ID', str, required=True)
+
+        chat_ids: List[str] = [cid.strip() for cid in chat_ids_raw.split(',') if cid.strip()]
+
+        if not chat_ids:
+            raise ValueError("TELEGRAM_CHAT_ID не содержит валидных ID")
+
+        return {
+            'bot_token': bot_token,
+            'chat_ids': chat_ids
+        }
+
     def get_trading_symbol(self) -> str:
         """Возвращает торгуемый символ"""
         trading_config = self.get_trading_config()
@@ -175,6 +191,7 @@ class ConfigManager:
         self.get_trading_config.cache_clear()
         self.get_server_config.cache_clear()
         self.get_trailing_stop_config.cache_clear()
+        self.get_telegram_config.cache_clear()
 
 
 config_manager = ConfigManager()

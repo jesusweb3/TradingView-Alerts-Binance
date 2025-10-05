@@ -11,6 +11,8 @@ from src.utils.logger import get_logger
 from src.config.manager import config_manager
 from src.strategies.strategy import Strategy
 from src.monitoring.health_monitor import health_monitor
+from src.telegram.notifier import TelegramNotifier
+from src.telegram.handler import initialize_telegram
 
 logger = get_logger(__name__)
 
@@ -20,6 +22,7 @@ class AppState:
     def __init__(self):
         self.allowed_ips: Set[str] = set()
         self.strategy: Optional[Strategy] = None
+        self.telegram_notifier: Optional[TelegramNotifier] = None
 
 
 class RequestTrackingMiddleware(BaseHTTPMiddleware):
@@ -58,6 +61,18 @@ async def initialize_app():
 
         server_config = config_manager.get_server_config()
         app_state.allowed_ips = set(server_config['allowed_ips'])
+
+        telegram_config = config_manager.get_telegram_config()
+        app_state.telegram_notifier = TelegramNotifier(
+            bot_token=telegram_config['bot_token'],
+            chat_ids=telegram_config['chat_ids']
+        )
+
+        if app_state.telegram_notifier.test_connection():
+            initialize_telegram(app_state.telegram_notifier)
+            logger.info("Telegram уведомления инициализированы")
+        else:
+            raise RuntimeError("Не удалось подключиться к Telegram боту")
 
         trading_config = config_manager.get_trading_config()
         symbol = trading_config['symbol']
