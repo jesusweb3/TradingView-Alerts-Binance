@@ -61,21 +61,19 @@ async def initialize_app():
 
         trading_config = config_manager.get_trading_config()
         symbol = trading_config['symbol']
-        logger.info(f"Символ для торговли: {symbol}")
 
-        trailing_config = config_manager.get_trailing_stop_config()
-        if trailing_config['enabled']:
-            logger.info(f"Трейлинг стоп включен: активация {trailing_config['activation_percent']}%, "
-                        f"стоп {trailing_config['stop_percent']}%")
+        stop_config = config_manager.get_trailing_stop_config()
+        if stop_config['enabled']:
+            logger.info(f"Актив: {symbol} с включенным стопом: активация {stop_config['activation_percent']}%, "
+                        f"стоп {stop_config['stop_percent']}%")
         else:
-            logger.info("Трейлинг стоп отключен")
+            logger.info(f"Актив: {symbol} с отключенным стопом")
 
         app_state.strategy = Strategy()
 
         app.state.app_state = app_state  # type: ignore[attr-defined]
 
-        health_monitor.start_monitoring()
-        logger.info("Мониторинг здоровья запущен")
+        health_monitor.start_monitoring(app_state.strategy)
 
     except Exception as e:
         logger.error(f"Ошибка инициализации приложения: {e}")
@@ -139,29 +137,9 @@ def get_client_ip(request: Request) -> str:
 
 
 @app.get("/health")
-async def health_check(strategy: Strategy = Depends(get_strategy)):
-    """Health check endpoint с информацией о трейлинг стопе"""
-    try:
-        symbol = config_manager.get_trading_symbol()
-        trailing_config = config_manager.get_trailing_stop_config()
-
-        strategy_status = strategy.get_status()
-
-        return {
-            "status": "ok",
-            "trading": {
-                "symbol": symbol
-            },
-            "trailing_stop": trailing_config,
-            "strategy_status": strategy_status
-        }
-    except Exception as e:
-        return {
-            "status": "ok",
-            "trading": {
-                "error": str(e)
-            }
-        }
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "ok"}
 
 
 @app.post("/webhook")
@@ -207,7 +185,6 @@ def start_server_sync():
 
     server_ip = get_server_ip()
     logger.info(f"Ваш хук для TradingView: http://{server_ip}/webhook")
-    logger.info(f"Health check: http://{server_ip}/health")
 
     uvicorn.run(
         app,

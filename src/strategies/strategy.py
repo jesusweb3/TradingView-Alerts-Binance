@@ -14,7 +14,7 @@ Action = Literal["buy", "sell"]
 
 
 class Strategy:
-    """Торговая стратегия с трейлинг стопом"""
+    """Торговая стратегия со стопами"""
 
     def __init__(self):
         binance_config = config_manager.get_binance_config()
@@ -34,7 +34,7 @@ class Strategy:
         self.current_price: Optional[float] = None
         self._price_lock = threading.Lock()
 
-        self.trailing_stop = StopManager(self.exchange)
+        self.stop_manager = StopManager(self.exchange)
 
         self.price_stream = BinancePriceStream(self.symbol, self._on_price_update)
         self.price_stream.start()
@@ -52,9 +52,19 @@ class Strategy:
             with self._price_lock:
                 self.current_price = price
 
-            self.trailing_stop.check_price_and_activate(price)
+            self.stop_manager.check_price_and_activate(price)
         except Exception as e:
             logger.error(f"Ошибка обработки обновления цены {price}: {e}")
+
+    def get_current_price(self) -> Optional[float]:
+        """
+        Возвращает текущую цену из WebSocket потока
+
+        Returns:
+            Текущая цена или None если цена недоступна
+        """
+        with self._price_lock:
+            return self.current_price
 
     def _restore_state_after_restart(self):
         """
@@ -90,14 +100,14 @@ class Strategy:
                 logger.info("Обнаружен активный стоп-ордер, восстановление не требуется")
                 return
 
-            logger.info("Стоп-ордер не обнаружен, восстанавливаем мониторинг трейлинг-стопа")
+            logger.info("Стоп-ордер не обнаружен, восстанавливаем мониторинг стопа")
 
             entry_price = current_position['entry_price']
             position_side = current_position['side']
 
-            self.trailing_stop.start_monitoring(normalized_symbol, entry_price, position_side)
+            self.stop_manager.start_monitoring(normalized_symbol, entry_price, position_side)
 
-            logger.info(f"Мониторинг трейлинг-стопа успешно восстановлен для {position_side} позиции")
+            logger.info(f"Мониторинг стопа успешно восстановлен для {position_side} позиции")
 
         except Exception as e:
             logger.error(f"Ошибка восстановления состояния после перезапуска: {e}")
@@ -185,7 +195,7 @@ class Strategy:
 
     def process_signal(self, action: Action) -> bool:
         """
-        Обрабатывает торговый сигнал с учетом трейлинг стопа
+        Обрабатывает торговый сигнал с учетом стопа
 
         Логика:
         1. Отменяем активный стоп перед любой операцией
@@ -194,10 +204,10 @@ class Strategy:
         4. Если позиции нет - открываем новую
         5. Если есть позиция в том же направлении - игнорируем
         6. Если есть позиция в противоположном направлении - разворачиваем
-        7. После успешной операции - запускаем мониторинг трейлинг стопа
+        7. После успешной операции - запускаем мониторинг стопа
         """
         try:
-            self.trailing_stop.cancel_active_stop()
+            self.stop_manager.cancel_active_stop()
 
             normalized_symbol = self.exchange.normalize_symbol(self.symbol)
             current_position = self.exchange.get_current_position(normalized_symbol)
@@ -211,7 +221,7 @@ class Strategy:
                 success = self._handle_existing_position(action, current_position, normalized_symbol)
 
             if success:
-                self._start_trailing_stop_monitoring(action, normalized_symbol)
+                self._start_stop_monitoring(action, normalized_symbol)
 
             return success
 
@@ -258,9 +268,9 @@ class Strategy:
 
         return self._reverse_position(normalized_symbol)
 
-    def _start_trailing_stop_monitoring(self, action: Action, normalized_symbol: str):
+    def _start_stop_monitoring(self, action: Action, normalized_symbol: str):
         """
-        Запускает мониторинг трейлинг стопа после успешной торговой операции
+        Запускает мониторинг стопа после успешной торговой операции
 
         Args:
             action: Торговый сигнал
@@ -271,12 +281,12 @@ class Strategy:
 
             if entry_price:
                 position_side = 'Buy' if action == "buy" else 'Sell'
-                self.trailing_stop.start_monitoring(normalized_symbol, entry_price, position_side)
+                self.stop_manager.start_monitoring(normalized_symbol, entry_price, position_side)
             else:
                 logger.warning(f"Не удалось получить цену входа для {normalized_symbol}")
 
         except Exception as e:
-            logger.error(f"Ошибка запуска мониторинга трейлинг стопа: {e}")
+            logger.error(f"Ошибка запуска мониторинга стопа: {e}")
 
     @staticmethod
     def _get_position_size() -> float:
@@ -343,8 +353,8 @@ class Strategy:
             if self.price_stream:
                 self.price_stream.stop()
 
-            if self.trailing_stop:
-                self.trailing_stop.stop_monitoring()
+            if self.stop_manager:
+                self.stop_manager.stop_monitoring()
 
             logger.info("Очистка ресурсов стратегии завершена")
 
@@ -364,11 +374,11 @@ class Strategy:
             'current_price': current_price
         }
 
-        if self.trailing_stop:
-            status['trailing_stop_info'] = {
-                'monitoring': self.trailing_stop.is_monitoring(),
-                'has_active_stop': self.trailing_stop.has_active_stop(),
-                'stop_details': self.trailing_stop.get_stop_info()
+        if self.stop_manager:
+            status['stop_info'] = {
+                'monitoring': self.stop_manager.is_monitoring(),
+                'has_active_stop': self.stop_manager.has_active_stop(),
+                'stop_details': self.stop_manager.get_stop_info()
             }
 
         return status

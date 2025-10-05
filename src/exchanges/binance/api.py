@@ -33,7 +33,7 @@ class BinanceClient(QuantityCalculator):
         self._setup_leverage(symbol)
         info = self.get_instrument_info(symbol)
         self.logger.info(
-            f"Символ {symbol} инициализирован: плечо {self.leverage}x, "
+            f"Актив {symbol} инициализирован: плечо {self.leverage}x, "
             f"QtyStep={info.get('qty_step')}, MinQty={info.get('min_qty')}"
         )
 

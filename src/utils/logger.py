@@ -5,8 +5,6 @@ import sys
 import os
 from datetime import datetime
 
-_screen_cleared = False
-
 
 class MillisecondFormatter(logging.Formatter):
     """Форматтер с миллисекундами (3 цифры)"""
@@ -32,15 +30,6 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     Returns:
         Настроенный логгер
     """
-    global _screen_cleared
-
-    if not _screen_cleared:
-        if sys.platform == 'win32':
-            os.system('cls')
-        else:
-            os.system('clear')
-        _screen_cleared = True
-
     logger = logging.getLogger(name)
 
     if logger.handlers:

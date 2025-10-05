@@ -21,6 +21,7 @@ class BinancePriceStream:
         self.websocket: Optional[ClientConnection] = None
         self.is_running = False
         self.task: Optional[asyncio.Task] = None
+        self.first_price_received = False
 
     def start(self):
         """Запуск потока цен"""
@@ -31,7 +32,7 @@ class BinancePriceStream:
         self.is_running = True
         loop = asyncio.get_event_loop()
         self.task = loop.create_task(self._connect_loop())
-        logger.info(f"WebSocket поток для {self.symbol.upper()} запущен")
+        logger.info(f"Запускаем WebSocket поток для {self.symbol.upper()}")
 
     def stop(self):
         """Остановка потока цен"""
@@ -52,8 +53,6 @@ class BinancePriceStream:
 
         while self.is_running:
             try:
-                logger.info(f"Подключение к потоку {self.stream}")
-
                 self.websocket = await connect(
                     self.ws_url,
                     ping_interval=20,
@@ -66,9 +65,9 @@ class BinancePriceStream:
                     "id": 1
                 }
                 await self.websocket.send(json.dumps(sub_msg))
-                logger.info(f"WebSocket соединение открыто для {self.symbol.upper()}")
 
                 backoff = 1
+                self.first_price_received = False
 
                 await self._listen()
 
@@ -120,6 +119,11 @@ class BinancePriceStream:
                     continue
 
                 current_price = float(price_str)
+
+                if not self.first_price_received:
+                    logger.info(f"WebSocket соединение открыто для {self.symbol.upper()}, цена ${current_price:.2f}")
+                    self.first_price_received = True
+
                 self.on_price_update(current_price)
 
             except json.JSONDecodeError as e:

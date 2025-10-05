@@ -33,7 +33,7 @@ class ActiveStop:
 
 
 class StopManager:
-    """Менеджер трейлинг стопов для Binance с расчетом по PnL"""
+    """Менеджер стопов для Binance с расчетом по PnL"""
 
     def __init__(self, exchange_client):
         self.exchange_client = exchange_client
@@ -46,7 +46,7 @@ class StopManager:
 
     def start_monitoring(self, symbol: str, entry_price: float, position_side: str):
         """
-        Начинает мониторинг для установки трейлинг стопа с расчетом по PnL
+        Начинает мониторинг для установки стопа с расчетом по PnL
 
         Args:
             symbol: Торговый символ
@@ -56,7 +56,7 @@ class StopManager:
         config = config_manager.get_trailing_stop_config()
 
         if not config['enabled']:
-            logger.info("Трейлинг стоп отключен")
+            logger.info("Стоп отключен")
             return
 
         activation_percent = config['activation_percent']
@@ -75,7 +75,7 @@ class StopManager:
         self._is_placing_order = False
 
         logger.info(
-            f"Запуск мониторинга трейлинг стопа: Цена входа: ${entry_price:.2f}. "
+            f"Запуск мониторинга стопа: Цена входа: ${entry_price:.2f}. "
             f"PnL для активации: {activation_percent}% -> цена ${activation_price:.2f}. "
             f"PnL для стопа: {stop_percent}% -> цена ${limit_price:.2f}. "
             f"Триггер цена: ${stop_price:.2f}"
@@ -195,7 +195,7 @@ class StopManager:
         self.monitoring_active = False
         self.pending_stop = None
         self._is_placing_order = False
-        logger.info("Мониторинг трейлинг стопа остановлен")
+        logger.info("Мониторинг стопа остановлен")
 
     def has_active_stop(self) -> bool:
         """Проверяет есть ли активный стоп ордер"""
