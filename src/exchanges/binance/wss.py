@@ -23,6 +23,7 @@ class BinancePriceStream:
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 5
         self.task: Optional[asyncio.Task] = None
+        self.first_message_received = False
 
     def start(self):
         """Запуск потока цен"""
@@ -32,6 +33,7 @@ class BinancePriceStream:
 
         self.is_running = True
         self.reconnect_attempts = 0
+        self.first_message_received = False
 
         loop = asyncio.get_event_loop()
         self.task = loop.create_task(self._connect_loop())
@@ -90,12 +92,14 @@ class BinancePriceStream:
 
                     self.reconnect_attempts = 0
                     backoff = 1
+                    self.first_message_received = False
 
                     await self._listen(websocket)
 
                 finally:
                     await websocket.close()
                     self.websocket = None
+                    logger.info(f"WebSocket соединение закрыто для {self.symbol}")
 
             except ConnectionClosed:
                 if self.is_running:
@@ -103,6 +107,13 @@ class BinancePriceStream:
                     backoff = await self._handle_reconnect(backoff)
                 else:
                     logger.info(f"WebSocket соединение корректно закрыто для {self.symbol}")
+                    break
+
+            except ConnectionResetError as e:
+                if self.is_running:
+                    logger.warning(f"Соединение сброшено удаленным хостом для {self.symbol}: {e}")
+                    backoff = await self._handle_reconnect(backoff)
+                else:
                     break
 
             except WebSocketException as e:
@@ -144,6 +155,11 @@ class BinancePriceStream:
                         continue
 
                     current_price = float(price_str)
+
+                    if not self.first_message_received:
+                        self.first_message_received = True
+                        logger.info(f"WebSocket для {self.symbol.upper()} получает данные, текущая цена: ${current_price:.2f}")
+
                     self.on_price_update(current_price)
 
                 except json.JSONDecodeError as e:
