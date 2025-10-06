@@ -387,8 +387,11 @@ class Strategy:
             ws_stats = self.price_stream.get_connection_stats()
             status['websocket'] = {
                 'is_running': ws_stats['is_running'],
+                'is_connected': ws_stats['is_connected'],
                 'is_healthy': self.price_stream.is_healthy(),
                 'connection_count': ws_stats['connection_count'],
+                'last_price': ws_stats['last_price'],
+                'last_price_update': ws_stats['last_price_update'],
                 'last_successful_connection': ws_stats['last_successful_connection']
             }
             if 'current_downtime_seconds' in ws_stats:

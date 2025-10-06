@@ -23,8 +23,10 @@ class BinancePriceStream:
         self.task: Optional[asyncio.Task] = None
 
         self.last_price: Optional[float] = None
+        self.last_price_update: Optional[datetime] = None
         self.connection_count = 0
         self.last_successful_connection: Optional[datetime] = None
+        self.is_connected = False
         self.disconnection_start: Optional[datetime] = None
         self.long_disconnection_notified = False
 
@@ -71,6 +73,7 @@ class BinancePriceStream:
         ):
             try:
                 self._on_connection_established()
+                self.is_connected = True
 
                 async for raw_message in websocket:
                     if not self.is_running:
@@ -79,6 +82,8 @@ class BinancePriceStream:
                     await self._process_message(raw_message)
 
             except ConnectionClosed as e:
+                self.is_connected = False
+
                 if not self.is_running:
                     logger.info(f"WebSocket для {self.symbol} закрыт по запросу")
                     break
@@ -88,10 +93,12 @@ class BinancePriceStream:
                 continue
 
             except asyncio.CancelledError:
+                self.is_connected = False
                 logger.info(f"WebSocket задача отменена для {self.symbol}")
                 break
 
             except Exception as e:
+                self.is_connected = False
                 logger.error(f"Неожиданная ошибка в WebSocket для {self.symbol}: {e}")
                 self._on_connection_lost()
                 continue
@@ -101,12 +108,15 @@ class BinancePriceStream:
         self.connection_count += 1
         self.last_successful_connection = datetime.now(timezone.utc)
 
-        if self.disconnection_start:
-            downtime = (datetime.now(timezone.utc) - self.disconnection_start).total_seconds()
-            logger.info(
-                f"WebSocket переподключен для {self.symbol.upper()} "
-                f"(попытка #{self.connection_count}, downtime {downtime:.1f}s)"
-            )
+        if self.connection_count == 1:
+            logger.info(f"WebSocket подключен к {self.symbol.upper()}, ожидаем первую цену...")
+        else:
+            if self.disconnection_start:
+                downtime = (datetime.now(timezone.utc) - self.disconnection_start).total_seconds()
+                logger.info(
+                    f"WebSocket переподключен для {self.symbol.upper()} "
+                    f"(попытка #{self.connection_count}, downtime {downtime:.1f}s)"
+                )
 
         self.disconnection_start = None
         self.long_disconnection_notified = False
@@ -140,13 +150,15 @@ class BinancePriceStream:
 
             current_price = float(price_str)
 
-            if self.connection_count == 1 and self.last_price is None:
-                logger.info(
-                    f"WebSocket соединение открыто для {self.symbol.upper()}, "
-                    f"первая цена ${current_price:.2f}"
-                )
-
             self.last_price = current_price
+            self.last_price_update = datetime.now(timezone.utc)
+
+            if self.connection_count == 1 and self.last_price_update:
+                if (datetime.now(timezone.utc) - self.last_successful_connection).total_seconds() < 2:
+                    logger.info(
+                        f"WebSocket первая цена получена для {self.symbol.upper()}: ${current_price:.2f}"
+                    )
+
             self.on_price_update(current_price)
 
         except json.JSONDecodeError as e:
@@ -165,8 +177,10 @@ class BinancePriceStream:
         stats = {
             'symbol': self.symbol.upper(),
             'is_running': self.is_running,
+            'is_connected': self.is_connected,
             'connection_count': self.connection_count,
             'last_price': self.last_price,
+            'last_price_update': self.last_price_update,
             'last_successful_connection': self.last_successful_connection
         }
 
@@ -179,16 +193,16 @@ class BinancePriceStream:
 
     def is_healthy(self) -> bool:
         """
-        Проверяет здоровье соединения
+        Проверяет здоровье соединения на основе получения данных
 
         Returns:
-            True если соединение активно или было активно менее 5 минут назад
+            True если получали данные в последние 60 секунд
         """
-        if not self.last_successful_connection:
+        if not self.last_price_update:
             return False
 
-        time_since_last_connection = (
-                datetime.now(timezone.utc) - self.last_successful_connection
+        time_since_last_update = (
+                datetime.now(timezone.utc) - self.last_price_update
         ).total_seconds()
 
-        return time_since_last_connection < 300
+        return time_since_last_update < 60

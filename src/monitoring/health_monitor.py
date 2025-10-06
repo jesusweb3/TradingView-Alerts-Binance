@@ -3,6 +3,7 @@
 import time
 import threading
 from typing import Optional, TYPE_CHECKING
+from datetime import datetime, timezone
 from src.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -120,16 +121,25 @@ class HealthMonitor:
                 last_price = 0.0
 
             connection_count = stats.get('connection_count', 0)
+            is_connected = stats.get('is_connected', False)
+            last_price_update = stats.get('last_price_update')
 
             if is_healthy:
-                if 'current_downtime_seconds' in stats:
-                    downtime = stats['current_downtime_seconds']
-                    status = f"переподключается (простой {downtime:.0f}s)"
+                if last_price_update:
+                    seconds_since_update = (
+                            datetime.now(timezone.utc) - last_price_update
+                    ).total_seconds()
+                    status = f"активен (обновление {seconds_since_update:.0f}s назад)"
                 else:
                     status = "активен"
             else:
-                if stats.get('last_successful_connection'):
-                    status = "отключен >5 минут"
+                if is_connected:
+                    status = "подключен, но нет данных"
+                elif 'current_downtime_seconds' in stats:
+                    downtime = stats['current_downtime_seconds']
+                    status = f"переподключается (простой {downtime:.0f}s)"
+                elif stats.get('last_successful_connection'):
+                    status = "отключен >1 минуты"
                 else:
                     status = "никогда не подключался"
 
