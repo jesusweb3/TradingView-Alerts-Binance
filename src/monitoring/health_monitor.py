@@ -75,26 +75,74 @@ class HealthMonitor:
                 logger.error("Health endpoint вернул неверные данные")
                 return
 
-            current_price = self._get_current_websocket_price()
-            if current_price:
-                logger.info(f"Health check OK | WebSocket цена: ${current_price:.2f}")
+            ws_info = self._get_websocket_status()
+
+            if ws_info['is_healthy']:
+                logger.info(
+                    f"Health check OK | WebSocket: {ws_info['status']} | "
+                    f"Цена: ${ws_info['price']:.2f} | "
+                    f"Переподключений: {ws_info['reconnections']}"
+                )
             else:
-                logger.info("Health check OK | WebSocket цена: недоступна")
+                logger.warning(
+                    f"Health check: WebSocket проблемы | {ws_info['status']} | "
+                    f"Последняя цена: ${ws_info['price']:.2f}"
+                )
 
         except Exception as e:
             logger.error(f"Ошибка health check: {e}")
 
-    def _get_current_websocket_price(self) -> Optional[float]:
-        """Получает текущую цену из WebSocket через стратегию"""
-        try:
-            if self.strategy is None:
-                return None
+    def _get_websocket_status(self) -> dict:
+        """
+        Получает статус WebSocket соединения
 
-            return self.strategy.get_current_price()
+        Returns:
+            Словарь со статусом WebSocket и последней ценой
+        """
+        default_response = {
+            'is_healthy': False,
+            'status': 'недоступен',
+            'price': 0.0,
+            'reconnections': 0
+        }
+
+        try:
+            if self.strategy is None or self.strategy.price_stream is None:
+                return default_response
+
+            price_stream = self.strategy.price_stream
+
+            is_healthy = price_stream.is_healthy()
+            stats = price_stream.get_connection_stats()
+
+            last_price = stats.get('last_price', 0.0)
+            if last_price is None:
+                last_price = 0.0
+
+            connection_count = stats.get('connection_count', 0)
+
+            if is_healthy:
+                if 'current_downtime_seconds' in stats:
+                    downtime = stats['current_downtime_seconds']
+                    status = f"переподключается (простой {downtime:.0f}s)"
+                else:
+                    status = "активен"
+            else:
+                if stats.get('last_successful_connection'):
+                    status = "отключен >5 минут"
+                else:
+                    status = "никогда не подключался"
+
+            return {
+                'is_healthy': is_healthy,
+                'status': status,
+                'price': last_price,
+                'reconnections': connection_count - 1 if connection_count > 0 else 0
+            }
 
         except Exception as e:
-            logger.error(f"Ошибка получения цены из WebSocket: {e}")
-            return None
+            logger.error(f"Ошибка получения статуса WebSocket: {e}")
+            return default_response
 
 
 health_monitor = HealthMonitor()

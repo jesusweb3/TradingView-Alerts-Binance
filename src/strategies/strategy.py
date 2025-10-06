@@ -58,13 +58,20 @@ class Strategy:
 
     def get_current_price(self) -> Optional[float]:
         """
-        Возвращает текущую цену из WebSocket потока
+        Возвращает текущую цену из WebSocket потока с fallback на последнюю известную
 
         Returns:
-            Текущая цена или None если цена недоступна
+            Текущая цена или последняя известная цена если WebSocket временно недоступен
         """
         with self._price_lock:
-            return self.current_price
+            if self.current_price is not None:
+                return self.current_price
+
+        last_known_price = self.price_stream.get_last_price()
+        if last_known_price is not None:
+            logger.debug(f"Используем последнюю известную цену: ${last_known_price:.2f}")
+
+        return last_known_price
 
     def _restore_state_after_restart(self):
         """
@@ -308,8 +315,11 @@ class Strategy:
             current_price = self.current_price
 
         if current_price is None:
-            logger.error("Цена из WebSocket недоступна")
-            return False
+            current_price = self.price_stream.get_last_price()
+            if current_price is None:
+                logger.error("Цена из WebSocket недоступна")
+                return False
+            logger.warning(f"Используем последнюю известную цену ${current_price:.2f}")
 
         if action == "buy":
             success = self.exchange.open_long_position(
@@ -370,9 +380,19 @@ class Strategy:
             'exchange': self.exchange.name,
             'symbol': self.symbol,
             'last_action': self.last_action,
-            'price_stream_active': self.price_stream.is_running if self.price_stream else False,
             'current_price': current_price
         }
+
+        if self.price_stream:
+            ws_stats = self.price_stream.get_connection_stats()
+            status['websocket'] = {
+                'is_running': ws_stats['is_running'],
+                'is_healthy': self.price_stream.is_healthy(),
+                'connection_count': ws_stats['connection_count'],
+                'last_successful_connection': ws_stats['last_successful_connection']
+            }
+            if 'current_downtime_seconds' in ws_stats:
+                status['websocket']['current_downtime_seconds'] = ws_stats['current_downtime_seconds']
 
         if self.stop_manager:
             status['stop_info'] = {
