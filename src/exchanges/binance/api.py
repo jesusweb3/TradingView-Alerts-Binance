@@ -297,15 +297,13 @@ class BinanceClient(QuantityCalculator):
         return True
 
     @retry_on_api_error()
-    def reverse_position_fast(self, symbol: str) -> bool:
+    def reverse_position_fast(self, symbol: str, total_quantity: float) -> bool:
         """
-        Быстрый разворот позиции на Binance через удвоение объема
-
-        Логика: если открыт Long на 100, то для разворота в Short
-        отправляем SELL ордер на 200 (закроет 100 Long + откроет 100 Short)
+        Разворот позиции с указанным итоговым объемом
 
         Args:
             symbol: Торговый символ
+            total_quantity: Итоговый объем для разворота (предыдущий + новый)
 
         Returns:
             True если разворот успешен, False иначе
@@ -316,18 +314,16 @@ class BinanceClient(QuantityCalculator):
             return False
 
         current_side = current_position['side']
-        current_size = current_position['size']
 
         if current_side == "Buy":
             reverse_side = "SELL"
         else:
             reverse_side = "BUY"
 
-        reverse_quantity = current_size * 2
-        rounded_quantity = self.round_quantity(reverse_quantity, symbol)
+        rounded_quantity = self.round_quantity(total_quantity, symbol)
 
         self.logger.info(
-            f"Быстрый разворот {symbol}: {current_side} {current_size} -> {reverse_side} {rounded_quantity}")
+            f"Разворот {symbol}: {current_side} -> {reverse_side}, объем {rounded_quantity}")
 
         try:
             self.client.futures_create_order(
@@ -338,11 +334,11 @@ class BinanceClient(QuantityCalculator):
             )
 
             new_direction = "Long" if reverse_side == "BUY" else "Short"
-            self.logger.info(f"Позиция {symbol} развернута в {new_direction} одной операцией")
+            self.logger.info(f"Позиция {symbol} развернута в {new_direction}")
             return True
 
         except Exception as e:
-            self.logger.error(f"Ошибка быстрого разворота {symbol}: {e}")
+            self.logger.error(f"Ошибка разворота {symbol}: {e}")
             return False
 
     @retry_on_api_error()

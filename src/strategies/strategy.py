@@ -31,6 +31,7 @@ class Strategy:
         )
 
         self.last_action: Optional[Action] = None
+        self.last_quantity: Optional[float] = None
         self.current_price: Optional[float] = None
         self._price_lock = threading.Lock()
 
@@ -82,6 +83,7 @@ class Strategy:
         2. Проверяет есть ли активные стоп-ордера
         3. Если позиция есть, стопа нет → восстанавливает мониторинг
         4. Устанавливает last_action на основе направления позиции
+        5. Восстанавливает last_quantity из текущей позиции
         """
         try:
             normalized_symbol = self.exchange.normalize_symbol(self.symbol)
@@ -95,6 +97,8 @@ class Strategy:
                         f"{current_position['size']} по ${current_position['entry_price']:.2f}")
 
             self.last_action = "buy" if current_position['side'] == "Buy" else "sell"
+            self.last_quantity = current_position['size']
+            logger.info(f"Восстановлен last_quantity: {self.last_quantity}")
 
             open_orders = self.exchange.get_open_orders(normalized_symbol)
 
@@ -225,7 +229,7 @@ class Strategy:
             if current_position is None:
                 success = self._handle_no_position(action, normalized_symbol, position_size)
             else:
-                success = self._handle_existing_position(action, current_position, normalized_symbol)
+                success = self._handle_existing_position(action, current_position, normalized_symbol, position_size)
 
             if success:
                 self._start_stop_monitoring(action, normalized_symbol)
@@ -250,7 +254,7 @@ class Strategy:
         """
         return self._open_new_position(action, normalized_symbol, position_size)
 
-    def _handle_existing_position(self, action: Action, current_position: dict, normalized_symbol: str) -> bool:
+    def _handle_existing_position(self, action: Action, current_position: dict, normalized_symbol: str, position_size: float) -> bool:
         """
         Обрабатывает сигнал когда позиция уже открыта
 
@@ -258,6 +262,7 @@ class Strategy:
             action: Торговый сигнал
             current_position: Текущая позиция
             normalized_symbol: Нормализованный символ
+            position_size: Размер позиции
 
         Returns:
             True если операция успешна
@@ -273,7 +278,7 @@ class Strategy:
             logger.info(f"Позиция {self.symbol} уже в направлении {action} - пропускаем")
             return True
 
-        return self._reverse_position(normalized_symbol)
+        return self._reverse_position(normalized_symbol, position_size)
 
     def _start_stop_monitoring(self, action: Action, normalized_symbol: str):
         """
@@ -321,6 +326,8 @@ class Strategy:
                 return False
             logger.warning(f"Используем последнюю известную цену ${current_price:.2f}")
 
+        new_quantity = self.exchange.calculate_quantity(normalized_symbol, position_size, current_price)
+
         if action == "buy":
             success = self.exchange.open_long_position(
                 normalized_symbol, position_size, current_price
@@ -336,24 +343,53 @@ class Strategy:
             logger.error(f"Не удалось открыть {direction} позицию {normalized_symbol}")
             return False
 
+        self.last_quantity = new_quantity
+        logger.info(f"Сохранен last_quantity: {self.last_quantity}")
+
         entry_price = self.exchange.get_exact_entry_price(normalized_symbol)
         if entry_price:
             logger.info(f"Позиция {direction} открыта, точная цена входа ${entry_price:.2f}")
 
         return True
 
-    def _reverse_position(self, normalized_symbol: str) -> bool:
+    def _reverse_position(self, normalized_symbol: str, position_size: float) -> bool:
         """
-        Быстрый разворот позиции через удвоение объема
+        Разворот позиции с суммированием объемов
 
         Args:
             normalized_symbol: Нормализованный символ
+            position_size: Размер позиции из конфига
 
         Returns:
             True если разворот успешен, False иначе
         """
-        logger.info(f"Быстрый разворот позиции {normalized_symbol}")
-        return self.exchange.reverse_position_fast(normalized_symbol)
+        with self._price_lock:
+            current_price = self.current_price
+
+        if current_price is None:
+            current_price = self.price_stream.get_last_price()
+            if current_price is None:
+                logger.error("Цена из WebSocket недоступна для разворота")
+                return False
+            logger.warning(f"Используем последнюю известную цену ${current_price:.2f} для разворота")
+
+        new_quantity = self.exchange.calculate_quantity(normalized_symbol, position_size, current_price)
+
+        if self.last_quantity is None:
+            logger.warning("last_quantity не установлен, используем только новый объем")
+            total_quantity = new_quantity * 2
+        else:
+            total_quantity = self.last_quantity + new_quantity
+
+        logger.info(f"Разворот: предыдущий объем {self.last_quantity}, новый объем {new_quantity}, итого {total_quantity}")
+
+        success = self.exchange.reverse_position_fast(normalized_symbol, total_quantity)
+
+        if success:
+            self.last_quantity = new_quantity
+            logger.info(f"Сохранен новый last_quantity: {self.last_quantity}")
+
+        return success
 
     def cleanup(self):
         """Очистка ресурсов при завершении стратегии"""
@@ -380,6 +416,7 @@ class Strategy:
             'exchange': self.exchange.name,
             'symbol': self.symbol,
             'last_action': self.last_action,
+            'last_quantity': self.last_quantity,
             'current_price': current_price
         }
 
