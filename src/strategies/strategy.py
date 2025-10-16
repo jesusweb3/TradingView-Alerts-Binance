@@ -1,7 +1,7 @@
 # src/strategies/strategy.py
 
+import asyncio
 from typing import Optional, Literal
-import threading
 from src.utils.logger import get_logger
 from src.config.manager import config_manager
 from src.exchanges.binance.api import BinanceClient
@@ -14,7 +14,7 @@ Action = Literal["buy", "sell"]
 
 
 class Strategy:
-    """Торговая стратегия со стопами"""
+    """Async торговая стратегия со стопами"""
 
     def __init__(self):
         binance_config = config_manager.get_binance_config()
@@ -33,14 +33,27 @@ class Strategy:
         self.last_action: Optional[Action] = None
         self.last_quantity: Optional[float] = None
         self.current_price: Optional[float] = None
-        self._price_lock = threading.Lock()
+        self._price_lock = asyncio.Lock()
 
         self.stop_manager = StopManager(self.exchange)
+
+        self.price_stream: Optional[BinancePriceStream] = None
+        self._initialized = False
+
+    async def initialize(self):
+        """Async инициализация стратегии"""
+        if self._initialized:
+            return
+
+        await self.exchange.initialize()
 
         self.price_stream = BinancePriceStream(self.symbol, self._on_price_update)
         self.price_stream.start()
 
-        self._restore_state_after_restart()
+        await self._restore_state_after_restart()
+
+        self._initialized = True
+        logger.info("Стратегия инициализирована")
 
     def _on_price_update(self, price: float):
         """
@@ -50,21 +63,33 @@ class Strategy:
             price: Текущая цена актива
         """
         try:
-            with self._price_lock:
+            asyncio.create_task(self._async_price_update(price))
+        except Exception as e:
+            logger.error(f"Ошибка создания задачи обновления цены: {e}")
+
+    async def _async_price_update(self, price: float):
+        """
+        Async обработка обновления цены
+
+        Args:
+            price: Текущая цена актива
+        """
+        try:
+            async with self._price_lock:
                 self.current_price = price
 
-            self.stop_manager.check_price_and_activate(price)
+            await self.stop_manager.check_price_and_activate(price)
         except Exception as e:
             logger.error(f"Ошибка обработки обновления цены {price}: {e}")
 
-    def get_current_price(self) -> Optional[float]:
+    async def get_current_price(self) -> Optional[float]:
         """
         Возвращает текущую цену из WebSocket потока с fallback на последнюю известную
 
         Returns:
             Текущая цена или последняя известная цена если WebSocket временно недоступен
         """
-        with self._price_lock:
+        async with self._price_lock:
             if self.current_price is not None:
                 return self.current_price
 
@@ -74,7 +99,7 @@ class Strategy:
 
         return last_known_price
 
-    def _restore_state_after_restart(self):
+    async def _restore_state_after_restart(self):
         """
         Восстанавливает состояние после перезапуска сервера
 
@@ -87,7 +112,7 @@ class Strategy:
         """
         try:
             normalized_symbol = self.exchange.normalize_symbol(self.symbol)
-            current_position = self.exchange.get_current_position(normalized_symbol)
+            current_position = await self.exchange.get_current_position(normalized_symbol)
 
             if not current_position:
                 logger.info("Позиций не обнаружено при старте")
@@ -100,7 +125,7 @@ class Strategy:
             self.last_quantity = current_position['size']
             logger.info(f"Восстановлен last_quantity: {self.last_quantity}")
 
-            open_orders = self.exchange.get_open_orders(normalized_symbol)
+            open_orders = await self.exchange.get_open_orders(normalized_symbol)
 
             has_stop_order = any(
                 order.get('type') == 'STOP' and order.get('reduceOnly', False)
@@ -173,7 +198,7 @@ class Strategy:
         self.last_action = action
         return True
 
-    def process_webhook(self, message: str) -> Optional[dict]:
+    async def process_webhook(self, message: str) -> Optional[dict]:
         """
         Обрабатывает сообщение от webhook
 
@@ -191,7 +216,7 @@ class Strategy:
         if not self.should_process_signal(action):
             return {"status": "ignored", "message": "Сигнал отфильтрован как дубликат"}
 
-        success = self.process_signal(action)
+        success = await self.process_signal(action)
 
         if success:
             return {
@@ -204,7 +229,7 @@ class Strategy:
         else:
             return {"status": "error", "message": "Ошибка обработки сигнала"}
 
-    def process_signal(self, action: Action) -> bool:
+    async def process_signal(self, action: Action) -> bool:
         """
         Обрабатывает торговый сигнал с учетом стопа
 
@@ -218,21 +243,21 @@ class Strategy:
         7. После успешной операции - запускаем мониторинг стопа
         """
         try:
-            self.stop_manager.cancel_active_stop()
+            await self.stop_manager.cancel_active_stop()
 
             normalized_symbol = self.exchange.normalize_symbol(self.symbol)
-            current_position = self.exchange.get_current_position(normalized_symbol)
+            current_position = await self.exchange.get_current_position(normalized_symbol)
             position_size = self._get_position_size()
 
             logger.info(f"Начинаем обработку сигнала {action} для {self.symbol}")
 
             if current_position is None:
-                success = self._handle_no_position(action, normalized_symbol, position_size)
+                success = await self._handle_no_position(action, normalized_symbol, position_size)
             else:
-                success = self._handle_existing_position(action, current_position, normalized_symbol, position_size)
+                success = await self._handle_existing_position(action, current_position, normalized_symbol, position_size)
 
             if success:
-                self._start_stop_monitoring(action, normalized_symbol)
+                await self._start_stop_monitoring(action, normalized_symbol)
 
             return success
 
@@ -240,7 +265,7 @@ class Strategy:
             logger.error(f"Ошибка обработки сигнала {action}: {e}")
             return False
 
-    def _handle_no_position(self, action: Action, normalized_symbol: str, position_size: float) -> bool:
+    async def _handle_no_position(self, action: Action, normalized_symbol: str, position_size: float) -> bool:
         """
         Обрабатывает сигнал когда позиции нет
 
@@ -252,9 +277,9 @@ class Strategy:
         Returns:
             True если операция успешна
         """
-        return self._open_new_position(action, normalized_symbol, position_size)
+        return await self._open_new_position(action, normalized_symbol, position_size)
 
-    def _handle_existing_position(self, action: Action, current_position: dict, normalized_symbol: str, position_size: float) -> bool:
+    async def _handle_existing_position(self, action: Action, current_position: dict, normalized_symbol: str, position_size: float) -> bool:
         """
         Обрабатывает сигнал когда позиция уже открыта
 
@@ -278,9 +303,9 @@ class Strategy:
             logger.info(f"Позиция {self.symbol} уже в направлении {action} - пропускаем")
             return True
 
-        return self._reverse_position(normalized_symbol, position_size)
+        return await self._reverse_position(normalized_symbol, position_size)
 
-    def _start_stop_monitoring(self, action: Action, normalized_symbol: str):
+    async def _start_stop_monitoring(self, action: Action, normalized_symbol: str):
         """
         Запускает мониторинг стопа после успешной торговой операции
 
@@ -289,7 +314,7 @@ class Strategy:
             normalized_symbol: Нормализованный символ
         """
         try:
-            entry_price = self.exchange.get_exact_entry_price(normalized_symbol)
+            entry_price = await self.exchange.get_exact_entry_price(normalized_symbol)
 
             if entry_price:
                 position_side = 'Buy' if action == "buy" else 'Sell'
@@ -314,10 +339,9 @@ class Strategy:
             logger.error(f"Критическая ошибка получения размера позиции: {e}")
             raise RuntimeError(f"Не удалось загрузить размер позиции из конфигурации: {e}")
 
-    def _open_new_position(self, action: Action, normalized_symbol: str, position_size: float) -> bool:
+    async def _open_new_position(self, action: Action, normalized_symbol: str, position_size: float) -> bool:
         """Открывает новую позицию используя цену из WebSocket"""
-        with self._price_lock:
-            current_price = self.current_price
+        current_price = await self.get_current_price()
 
         if current_price is None:
             current_price = self.price_stream.get_last_price()
@@ -329,12 +353,12 @@ class Strategy:
         new_quantity = self.exchange.calculate_quantity(normalized_symbol, position_size, current_price)
 
         if action == "buy":
-            success = self.exchange.open_long_position(
+            success = await self.exchange.open_long_position(
                 normalized_symbol, position_size, current_price
             )
             direction = "Long"
         else:
-            success = self.exchange.open_short_position(
+            success = await self.exchange.open_short_position(
                 normalized_symbol, position_size, current_price
             )
             direction = "Short"
@@ -346,13 +370,13 @@ class Strategy:
         self.last_quantity = new_quantity
         logger.info(f"Сохранен last_quantity: {self.last_quantity}")
 
-        entry_price = self.exchange.get_exact_entry_price(normalized_symbol)
+        entry_price = await self.exchange.get_exact_entry_price(normalized_symbol)
         if entry_price:
             logger.info(f"Позиция {direction} открыта, точная цена входа ${entry_price:.2f}")
 
         return True
 
-    def _reverse_position(self, normalized_symbol: str, position_size: float) -> bool:
+    async def _reverse_position(self, normalized_symbol: str, position_size: float) -> bool:
         """
         Разворот позиции с суммированием объемов
 
@@ -363,8 +387,7 @@ class Strategy:
         Returns:
             True если разворот успешен, False иначе
         """
-        with self._price_lock:
-            current_price = self.current_price
+        current_price = await self.get_current_price()
 
         if current_price is None:
             current_price = self.price_stream.get_last_price()
@@ -383,7 +406,7 @@ class Strategy:
 
         logger.info(f"Разворот: предыдущий объем {self.last_quantity}, новый объем {new_quantity}, итого {total_quantity}")
 
-        success = self.exchange.reverse_position_fast(normalized_symbol, total_quantity)
+        success = await self.exchange.reverse_position_fast(normalized_symbol, total_quantity)
 
         if success:
             self.last_quantity = new_quantity
@@ -391,7 +414,7 @@ class Strategy:
 
         return success
 
-    def cleanup(self):
+    async def cleanup(self):
         """Очистка ресурсов при завершении стратегии"""
         try:
             logger.info("Начинается очистка ресурсов стратегии...")
@@ -402,6 +425,9 @@ class Strategy:
             if self.stop_manager:
                 self.stop_manager.stop_monitoring()
 
+            if self.exchange:
+                await self.exchange.close()
+
             logger.info("Очистка ресурсов стратегии завершена")
 
         except Exception as e:
@@ -409,15 +435,12 @@ class Strategy:
 
     def get_status(self) -> dict:
         """Возвращает текущий статус стратегии"""
-        with self._price_lock:
-            current_price = self.current_price
-
         status = {
             'exchange': self.exchange.name,
             'symbol': self.symbol,
             'last_action': self.last_action,
             'last_quantity': self.last_quantity,
-            'current_price': current_price
+            'current_price': self.current_price
         }
 
         if self.price_stream:

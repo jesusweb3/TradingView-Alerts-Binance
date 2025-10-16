@@ -85,10 +85,13 @@ async def initialize_app():
             logger.info(f"Актив: {symbol} с отключенным стопом")
 
         app_state.strategy = Strategy()
+        await app_state.strategy.initialize()
 
         app.state.app_state = app_state  # type: ignore[attr-defined]
 
         health_monitor.start_monitoring(app_state.strategy)
+
+        logger.info("Приложение успешно инициализировано")
 
     except Exception as e:
         logger.error(f"Ошибка инициализации приложения: {e}")
@@ -100,11 +103,11 @@ async def cleanup_app():
     try:
         logger.info("Начинается процедура завершения приложения...")
 
-        health_monitor.stop_monitoring()
+        await health_monitor.stop_monitoring()
 
-        app_state: AppState = app.state.app_state  # type: ignore
+        app_state: AppState = app.state.app_state  # type: ignore[attr-defined]
         if app_state.strategy:
-            app_state.strategy.cleanup()
+            await app_state.strategy.cleanup()
             logger.info("Ресурсы стратегии корректно завершены")
             app_state.strategy = None
 
@@ -180,7 +183,7 @@ async def webhook_handler(
             logger.warning("В webhook нет текстового сообщения")
             return {"status": "error", "message": "Нет текстового сообщения"}
 
-        result = strategy.process_webhook(message)
+        result = await strategy.process_webhook(message)
 
         if result is None:
             return {"status": "ignored", "message": "Сигнал не распознан"}

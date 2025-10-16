@@ -1,8 +1,8 @@
 # src/exchanges/binance/sl.py
 
+import asyncio
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
-import threading
 from src.utils.logger import get_logger
 from src.config.manager import config_manager
 
@@ -33,7 +33,7 @@ class ActiveStop:
 
 
 class StopManager:
-    """Менеджер стопов для Binance с расчетом по PnL"""
+    """Async менеджер стопов для Binance с расчетом по PnL"""
 
     def __init__(self, exchange_client):
         self.exchange_client = exchange_client
@@ -41,7 +41,7 @@ class StopManager:
         self.monitoring_active = False
         self.pending_stop: Optional[PendingStop] = None
         self.leverage = exchange_client.leverage
-        self._placement_lock = threading.Lock()
+        self._placement_lock = asyncio.Lock()
         self._is_placing_order = False
 
     def start_monitoring(self, symbol: str, entry_price: float, position_side: str):
@@ -90,7 +90,7 @@ class StopManager:
             position_side=position_side
         )
 
-    def check_price_and_activate(self, current_price: float):
+    async def check_price_and_activate(self, current_price: float):
         """
         Проверяет текущую цену и активирует стоп при необходимости
 
@@ -113,16 +113,16 @@ class StopManager:
             should_activate = True
 
         if should_activate:
-            with self._placement_lock:
+            async with self._placement_lock:
                 if self._is_placing_order or self.active_stop:
                     return
 
                 self._is_placing_order = True
 
             logger.info(f"Цена достигла активации {activation_price:.2f}, размещаем стоп ордер")
-            self._place_stop_order(self.pending_stop)
+            await self._place_stop_order(self.pending_stop)
 
-    def _place_stop_order(self, pending: PendingStop):
+    async def _place_stop_order(self, pending: PendingStop):
         """
         Размещает стоп ордер на бирже
 
@@ -132,14 +132,14 @@ class StopManager:
         try:
             side = 'SELL' if pending.position_side == 'Buy' else 'BUY'
 
-            position = self.exchange_client.get_current_position(pending.symbol)
+            position = await self.exchange_client.get_current_position(pending.symbol)
             if not position:
                 logger.error("Позиция не найдена для установки стопа")
                 return
 
             quantity = abs(position['size'])
 
-            result = self.exchange_client.place_stop_limit_order(
+            result = await self.exchange_client.place_stop_limit_order(
                 symbol=pending.symbol,
                 side=side,
                 quantity=quantity,
@@ -165,13 +165,13 @@ class StopManager:
         finally:
             self._is_placing_order = False
 
-    def cancel_active_stop(self):
+    async def cancel_active_stop(self):
         """Отменяет активный стоп ордер"""
         if self.active_stop:
             try:
                 logger.info(f"Отмена стоп ордера {self.active_stop.order_id} для {self.active_stop.symbol}")
 
-                success = self.exchange_client.cancel_stop_order(
+                success = await self.exchange_client.cancel_stop_order(
                     self.active_stop.symbol,
                     self.active_stop.order_id
                 )

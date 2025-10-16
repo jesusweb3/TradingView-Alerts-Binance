@@ -15,7 +15,7 @@ class QuantityCalculator(ABC):
         self._instruments_info: Dict[str, Dict[str, Any]] = {}
 
     @abstractmethod
-    def _fetch_instrument_info(self, symbol: str) -> Dict[str, Any]:
+    async def _fetch_instrument_info(self, symbol: str) -> Dict[str, Any]:
         """
         Получает информацию об инструменте с биржи
 
@@ -31,12 +31,12 @@ class QuantityCalculator(ABC):
         """
         pass
 
-    def get_instrument_info(self, symbol: str) -> Dict[str, Any]:
+    async def get_instrument_info(self, symbol: str) -> Dict[str, Any]:
         """Получает информацию об инструменте с кешированием"""
         if symbol in self._instruments_info:
             return self._instruments_info[symbol]
 
-        info = self._fetch_instrument_info(symbol)
+        info = await self._fetch_instrument_info(symbol)
         self._instruments_info[symbol] = info
 
         return info
@@ -72,7 +72,10 @@ class QuantityCalculator(ABC):
         Returns:
             Округленное значение
         """
-        info = self.get_instrument_info(symbol)
+        info = self._instruments_info.get(symbol)
+        if not info:
+            logger.warning(f"Информация об инструменте {symbol} не загружена, используем fallback")
+            return round(value, 3 if value_type == 'quantity' else 2)
 
         if value_type == 'quantity':
             step_key = 'qty_step'
@@ -139,7 +142,11 @@ class QuantityCalculator(ABC):
         Returns:
             True если количество валидно
         """
-        info = self.get_instrument_info(symbol)
+        info = self._instruments_info.get(symbol)
+        if not info:
+            logger.warning(f"Информация об инструменте {symbol} не загружена, пропускаем валидацию")
+            return True
+
         min_qty = info.get('min_qty')
         max_qty = info.get('max_qty')
 

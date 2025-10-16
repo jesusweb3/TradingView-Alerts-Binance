@@ -1,7 +1,7 @@
 # src/monitoring/health_monitor.py
 
-import time
-import threading
+import asyncio
+import aiohttp
 from typing import Optional, TYPE_CHECKING
 from datetime import datetime, timezone
 from src.utils.logger import get_logger
@@ -13,83 +13,87 @@ logger = get_logger(__name__)
 
 
 class HealthMonitor:
-    """Мониторинг состояния сервера через локальные запросы"""
+    """Async мониторинг состояния сервера"""
 
     def __init__(self):
         self.is_monitoring = False
-        self.monitor_thread: Optional[threading.Thread] = None
+        self.monitor_task: Optional[asyncio.Task] = None
         self.strategy: Optional['Strategy'] = None
         self.monitoring_interval = 600
         self.initial_delay = 10
 
     def start_monitoring(self, strategy: 'Strategy'):
-        """Запускает мониторинг в отдельном потоке"""
+        """Запускает мониторинг в async задаче"""
         if self.is_monitoring:
             return
 
         self.strategy = strategy
         self.is_monitoring = True
-        self.monitor_thread = threading.Thread(
-            target=self._monitoring_loop,
-            daemon=True,
-            name="HealthMonitor"
-        )
-        self.monitor_thread.start()
+        self.monitor_task = asyncio.create_task(self._monitoring_loop())
         logger.info("Мониторинг здоровья запущен (интервал 10 минут)")
 
-    def stop_monitoring(self):
+    async def stop_monitoring(self):
         """Останавливает мониторинг"""
         self.is_monitoring = False
-        if self.monitor_thread and self.monitor_thread.is_alive():
-            self.monitor_thread.join(timeout=5)
+        if self.monitor_task and not self.monitor_task.done():
+            self.monitor_task.cancel()
+            try:
+                await self.monitor_task
+            except asyncio.CancelledError:
+                pass
         logger.info("Мониторинг остановлен")
 
     def record_request(self):
         """Записывает успешный webhook запрос"""
         pass
 
-    def _monitoring_loop(self):
+    async def _monitoring_loop(self):
         """Основной цикл мониторинга"""
-        time.sleep(self.initial_delay)
+        await asyncio.sleep(self.initial_delay)
 
         while self.is_monitoring:
             try:
-                self._perform_health_check()
-                time.sleep(self.monitoring_interval)
+                await self._perform_health_check()
+                await asyncio.sleep(self.monitoring_interval)
+            except asyncio.CancelledError:
+                logger.info("Мониторинг отменён")
+                break
             except Exception as e:
                 logger.error(f"Ошибка в цикле мониторинга: {e}")
-                time.sleep(60)
+                await asyncio.sleep(60)
 
-    def _perform_health_check(self):
+    async def _perform_health_check(self):
         """Выполняет проверку через локальный запрос к /health"""
-        import requests
-
         try:
-            response = requests.get('http://127.0.0.1:80/health', timeout=10)
+            async with aiohttp.ClientSession() as session:
+                async with session.get('http://127.0.0.1:80/health', timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    if response.status != 200:
+                        logger.error(f"Health endpoint вернул код {response.status}")
+                        return
 
-            if response.status_code != 200:
-                logger.error(f"Health endpoint вернул код {response.status_code}")
-                return
+                    data = await response.json()
+                    if data.get('status') != 'ok':
+                        logger.error("Health endpoint вернул неверные данные")
+                        return
 
-            data = response.json()
-            if data.get('status') != 'ok':
-                logger.error("Health endpoint вернул неверные данные")
-                return
+                    ws_info = self._get_websocket_status()
 
-            ws_info = self._get_websocket_status()
+                    if ws_info['is_healthy']:
+                        logger.info(
+                            f"Health check OK | WebSocket: {ws_info['status']} | "
+                            f"Цена: ${ws_info['price']:.2f} | "
+                            f"Переподключений: {ws_info['reconnections']}"
+                        )
+                    else:
+                        logger.warning(
+                            f"Health check: WebSocket проблемы | {ws_info['status']} | "
+                            f"Последняя цена: ${ws_info['price']:.2f}"
+                        )
 
-            if ws_info['is_healthy']:
-                logger.info(
-                    f"Health check OK | WebSocket: {ws_info['status']} | "
-                    f"Цена: ${ws_info['price']:.2f} | "
-                    f"Переподключений: {ws_info['reconnections']}"
-                )
-            else:
-                logger.warning(
-                    f"Health check: WebSocket проблемы | {ws_info['status']} | "
-                    f"Последняя цена: ${ws_info['price']:.2f}"
-                )
-
+        except asyncio.TimeoutError:
+            logger.error("Health check: таймаут запроса")
+        except aiohttp.ClientError as e:
+            logger.error(f"Health check: ошибка соединения {e}")
         except Exception as e:
             logger.error(f"Ошибка health check: {e}")
 

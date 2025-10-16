@@ -1,6 +1,6 @@
 # src/exchanges/binance/api.py
 
-from binance.client import Client
+from binance import AsyncClient
 from binance.exceptions import BinanceAPIException
 from typing import Optional, Dict, Any, List
 from src.utils.logger import get_logger
@@ -9,7 +9,7 @@ from ..quantity_calculator import QuantityCalculator
 
 
 class BinanceClient(QuantityCalculator):
-    """Клиент для работы с Binance биржей"""
+    """Async клиент для работы с Binance биржей"""
 
     def __init__(self, api_key: str, secret: str, position_size: float, leverage: int, symbol: str):
         QuantityCalculator.__init__(self, leverage)
@@ -21,23 +21,40 @@ class BinanceClient(QuantityCalculator):
         self.leverage = leverage
         self.logger = get_logger(__name__)
 
-        self.client = Client(
+        self.client: Optional[AsyncClient] = None
+        self.symbol = symbol
+
+    async def initialize(self):
+        """Async инициализация клиента и символа"""
+        self.client = await AsyncClient.create(
             api_key=self.api_key,
             api_secret=self.secret
         )
 
-        self.initialize_symbol(symbol)
+        await self._setup_leverage(self.symbol)
+        await self.get_instrument_info(self.symbol)
+        self.logger.info(f"Актив {self.symbol} инициализирован: плечо {self.leverage}x")
 
-    def initialize_symbol(self, symbol: str):
-        """Инициализирует символ: устанавливает плечо и получает параметры"""
-        self._setup_leverage(symbol)
-        self.get_instrument_info(symbol)
-        self.logger.info(f"Актив {symbol} инициализирован: плечо {self.leverage}x")
+    async def close(self):
+        """Закрытие клиента"""
+        if self.client:
+            await self.client.close_connection()
+            self.logger.info("Binance клиент закрыт")
 
-    def _fetch_instrument_info(self, symbol: str) -> Dict[str, Any]:
+    async def get_instrument_info(self, symbol: str) -> Dict[str, Any]:
+        """Получает информацию об инструменте с кешированием"""
+        if symbol in self._instruments_info:
+            return self._instruments_info[symbol]
+
+        info = await self._fetch_instrument_info(symbol)
+        self._instruments_info[symbol] = info
+
+        return info
+
+    async def _fetch_instrument_info(self, symbol: str) -> Dict[str, Any]:
         """Получает информацию об инструменте с Binance API"""
         try:
-            exchange_info = self.client.futures_exchange_info()
+            exchange_info = await self.client.futures_exchange_info()
 
             symbol_info = None
             for s in exchange_info['symbols']:
@@ -69,10 +86,10 @@ class BinanceClient(QuantityCalculator):
             self.logger.error(f"Ошибка получения информации об инструменте {symbol}: {e}")
             raise
 
-    def _setup_leverage(self, symbol: str):
+    async def _setup_leverage(self, symbol: str):
         """Устанавливает плечо для символа"""
         try:
-            self.client.futures_change_leverage(
+            await self.client.futures_change_leverage(
                 symbol=symbol,
                 leverage=self.leverage
             )
@@ -120,9 +137,9 @@ class BinanceClient(QuantityCalculator):
         return clean_symbol[-4:] if len(clean_symbol) > 4 else clean_symbol
 
     @retry_on_api_error()
-    def get_account_balance(self, currency: str) -> float:
+    async def get_account_balance(self, currency: str) -> float:
         """Получает баланс аккаунта для указанной валюты"""
-        account = self.client.futures_account()
+        account = await self.client.futures_account()
 
         for asset in account['assets']:
             if asset['asset'] == currency:
@@ -130,9 +147,9 @@ class BinanceClient(QuantityCalculator):
         return 0.0
 
     @retry_on_api_error()
-    def get_current_position(self, symbol: str) -> Optional[Dict[str, Any]]:
+    async def get_current_position(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Получает текущую позицию по символу"""
-        positions = self.client.futures_position_information(symbol=symbol)
+        positions = await self.client.futures_position_information(symbol=symbol)
 
         if positions:
             position = positions[0]
@@ -149,7 +166,7 @@ class BinanceClient(QuantityCalculator):
         return None
 
     @retry_on_api_error()
-    def get_exact_entry_price(self, symbol: str) -> Optional[float]:
+    async def get_exact_entry_price(self, symbol: str) -> Optional[float]:
         """
         Получает точную цену входа из текущей позиции
 
@@ -160,7 +177,7 @@ class BinanceClient(QuantityCalculator):
             Цена входа или None если позиции нет
         """
         try:
-            positions = self.client.futures_position_information(symbol=symbol)
+            positions = await self.client.futures_position_information(symbol=symbol)
 
             if positions:
                 position = positions[0]
@@ -177,7 +194,7 @@ class BinanceClient(QuantityCalculator):
             return None
 
     @retry_on_api_error()
-    def get_open_orders(self, symbol: str) -> List[Dict[str, Any]]:
+    async def get_open_orders(self, symbol: str) -> List[Dict[str, Any]]:
         """
         Получает список открытых ордеров по символу
 
@@ -188,15 +205,15 @@ class BinanceClient(QuantityCalculator):
             Список открытых ордеров
         """
         try:
-            orders = self.client.futures_get_open_orders(symbol=symbol)
+            orders = await self.client.futures_get_open_orders(symbol=symbol)
             return orders
         except Exception as e:
             self.logger.error(f"Ошибка получения открытых ордеров для {symbol}: {e}")
             return []
 
     @retry_on_api_error()
-    def place_stop_limit_order(self, symbol: str, side: str, quantity: float,
-                               stop_price: float, limit_price: float) -> Optional[Dict[str, Any]]:
+    async def place_stop_limit_order(self, symbol: str, side: str, quantity: float,
+                                     stop_price: float, limit_price: float) -> Optional[Dict[str, Any]]:
         """
         Размещает стоп-лимит ордер с reduceOnly
 
@@ -218,7 +235,7 @@ class BinanceClient(QuantityCalculator):
             if not self.validate_quantity(rounded_quantity, symbol):
                 return None
 
-            result = self.client.futures_create_order(
+            result = await self.client.futures_create_order(
                 symbol=symbol,
                 side=side,
                 type='STOP',
@@ -240,7 +257,7 @@ class BinanceClient(QuantityCalculator):
             return None
 
     @retry_on_api_error()
-    def cancel_stop_order(self, symbol: str, order_id: str) -> bool:
+    async def cancel_stop_order(self, symbol: str, order_id: str) -> bool:
         """
         Отменяет стоп ордер
 
@@ -252,7 +269,7 @@ class BinanceClient(QuantityCalculator):
             True если ордер отменен успешно, False иначе
         """
         try:
-            self.client.futures_cancel_order(
+            await self.client.futures_cancel_order(
                 symbol=symbol,
                 orderId=order_id
             )
@@ -271,23 +288,23 @@ class BinanceClient(QuantityCalculator):
             self.logger.error(f"Ошибка отмены стоп ордера {order_id} для {symbol}: {e}")
             return False
 
-    def open_long_position(self, symbol: str, position_size: float, current_price: float) -> bool:
+    async def open_long_position(self, symbol: str, position_size: float, current_price: float) -> bool:
         """Открывает длинную позицию"""
-        return self._open_position(symbol, "BUY", position_size, current_price)
+        return await self._open_position(symbol, "BUY", position_size, current_price)
 
-    def open_short_position(self, symbol: str, position_size: float, current_price: float) -> bool:
+    async def open_short_position(self, symbol: str, position_size: float, current_price: float) -> bool:
         """Открывает короткую позицию"""
-        return self._open_position(symbol, "SELL", position_size, current_price)
+        return await self._open_position(symbol, "SELL", position_size, current_price)
 
     @retry_on_api_error()
-    def _open_position(self, symbol: str, side: str, position_size: float, current_price: float) -> bool:
+    async def _open_position(self, symbol: str, side: str, position_size: float, current_price: float) -> bool:
         """Открывает позицию используя переданную цену из WebSocket"""
         quantity = self.calculate_quantity(symbol, position_size, current_price)
 
         if not self.validate_quantity(quantity, symbol):
             return False
 
-        self.client.futures_create_order(
+        await self.client.futures_create_order(
             symbol=symbol,
             side=side,
             type='MARKET',
@@ -297,7 +314,7 @@ class BinanceClient(QuantityCalculator):
         return True
 
     @retry_on_api_error()
-    def reverse_position_fast(self, symbol: str, total_quantity: float) -> bool:
+    async def reverse_position_fast(self, symbol: str, total_quantity: float) -> bool:
         """
         Разворот позиции с указанным итоговым объемом
 
@@ -308,7 +325,7 @@ class BinanceClient(QuantityCalculator):
         Returns:
             True если разворот успешен, False иначе
         """
-        current_position = self.get_current_position(symbol)
+        current_position = await self.get_current_position(symbol)
         if not current_position:
             self.logger.warning(f"Нет позиции для разворота {symbol}")
             return False
@@ -326,7 +343,7 @@ class BinanceClient(QuantityCalculator):
             f"Разворот {symbol}: {current_side} -> {reverse_side}, объем {rounded_quantity}")
 
         try:
-            self.client.futures_create_order(
+            await self.client.futures_create_order(
                 symbol=symbol,
                 side=reverse_side,
                 type='MARKET',
@@ -342,16 +359,16 @@ class BinanceClient(QuantityCalculator):
             return False
 
     @retry_on_api_error()
-    def close_position(self, symbol: str) -> bool:
+    async def close_position(self, symbol: str) -> bool:
         """Закрывает текущую позицию по символу"""
-        position = self.get_current_position(symbol)
+        position = await self.get_current_position(symbol)
         if not position:
             return True
 
         opposite_side = "SELL" if position['side'] == "Buy" else "BUY"
         rounded_size = self.round_quantity(position['size'], symbol)
 
-        self.client.futures_create_order(
+        await self.client.futures_create_order(
             symbol=symbol,
             side=opposite_side,
             type='MARKET',
