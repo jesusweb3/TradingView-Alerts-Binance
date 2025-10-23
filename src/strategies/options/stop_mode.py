@@ -1,4 +1,4 @@
-# src/strategies/strategy.py
+# src/strategies/options/stop_mode.py
 
 import asyncio
 from typing import Optional, Literal
@@ -13,8 +13,8 @@ logger = get_logger(__name__)
 Action = Literal["buy", "sell"]
 
 
-class Strategy:
-    """Async торговая стратегия со стопами"""
+class StopStrategy:
+    """Торговая стратегия с трейлинг-стопами"""
 
     def __init__(self):
         binance_config = config_manager.get_binance_config()
@@ -53,7 +53,7 @@ class Strategy:
         await self._restore_state_after_restart()
 
         self._initialized = True
-        logger.info("Стратегия инициализирована")
+        logger.info("Стратегия со стопами инициализирована")
 
     def _on_price_update(self, price: float):
         """
@@ -208,7 +208,7 @@ class Strategy:
         Returns:
             Словарь с результатом обработки или None если сигнал не обработан
         """
-        action = Strategy.parse_message(message)
+        action = StopStrategy.parse_message(message)
         if not action:
             logger.info("Сигнал не распознан")
             return None
@@ -350,8 +350,6 @@ class Strategy:
                 return False
             logger.warning(f"Используем последнюю известную цену ${current_price:.2f}")
 
-        new_quantity = self.exchange.calculate_quantity(normalized_symbol, position_size, current_price)
-
         if action == "buy":
             success = await self.exchange.open_long_position(
                 normalized_symbol, position_size, current_price
@@ -367,6 +365,7 @@ class Strategy:
             logger.error(f"Не удалось открыть {direction} позицию {normalized_symbol}")
             return False
 
+        new_quantity = self.exchange.calculate_quantity(normalized_symbol, position_size, current_price)
         self.last_quantity = new_quantity
         logger.info(f"Сохранен last_quantity: {self.last_quantity}")
 
@@ -417,7 +416,7 @@ class Strategy:
     async def cleanup(self):
         """Очистка ресурсов при завершении стратегии"""
         try:
-            logger.info("Начинается очистка ресурсов стратегии...")
+            logger.info("Начинается очистка ресурсов стратегии со стопами...")
 
             if self.price_stream:
                 self.price_stream.stop()
@@ -428,7 +427,7 @@ class Strategy:
             if self.exchange:
                 await self.exchange.close()
 
-            logger.info("Очистка ресурсов стратегии завершена")
+            logger.info("Очистка ресурсов стратегии со стопами завершена")
 
         except Exception as e:
             logger.error(f"Ошибка при очистке ресурсов стратегии: {e}")
@@ -436,6 +435,7 @@ class Strategy:
     def get_status(self) -> dict:
         """Возвращает текущий статус стратегии"""
         status = {
+            'mode': 'stop',
             'exchange': self.exchange.name,
             'symbol': self.symbol,
             'last_action': self.last_action,

@@ -2,14 +2,16 @@
 
 import socket
 import asyncio
-from typing import Set, Optional
+from typing import Set, Optional, Union
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends
 from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 from src.utils.logger import get_logger
 from src.config.manager import config_manager
-from src.strategies.strategy import Strategy
+from src.strategies.options.factory import create_strategy
+from src.strategies.options.classic_mode import ClassicStrategy
+from src.strategies.options.stop_mode import StopStrategy
 from src.monitoring.health_monitor import health_monitor
 from src.telegram.notifier import TelegramNotifier
 from src.telegram.handler import initialize_telegram
@@ -21,7 +23,7 @@ class AppState:
     """Состояние приложения"""
     def __init__(self):
         self.allowed_ips: Set[str] = set()
-        self.strategy: Optional[Strategy] = None
+        self.strategy: Optional[Union[ClassicStrategy, StopStrategy]] = None
         self.telegram_notifier: Optional[TelegramNotifier] = None
 
 
@@ -42,7 +44,7 @@ def get_app_state(request: Request) -> AppState:
     return request.app.state.app_state
 
 
-def get_strategy(app_state: AppState = Depends(get_app_state)) -> Strategy:
+def get_strategy(app_state: AppState = Depends(get_app_state)) -> Union[ClassicStrategy, StopStrategy]:
     """Dependency для получения strategy"""
     if app_state.strategy is None:
         raise HTTPException(status_code=500, detail="Сервер не готов")
@@ -77,14 +79,16 @@ async def initialize_app():
         trading_config = config_manager.get_trading_config()
         symbol = trading_config['symbol']
 
-        stop_config = config_manager.get_trailing_stop_config()
-        if stop_config['enabled']:
-            logger.info(f"Актив: {symbol} с включенным стопом: активация {stop_config['activation_percent']}%, "
+        trading_option = config_manager.get_trading_option()
+
+        if trading_option == "stop":
+            stop_config = config_manager.get_trailing_stop_config()
+            logger.info(f"Актив: {symbol} со стопами: активация {stop_config['activation_percent']}%, "
                         f"стоп {stop_config['stop_percent']}%")
         else:
-            logger.info(f"Актив: {symbol} с отключенным стопом")
+            logger.info(f"Актив: {symbol} в классическом режиме (без стопов)")
 
-        app_state.strategy = Strategy()
+        app_state.strategy = create_strategy()
         await app_state.strategy.initialize()
 
         app.state.app_state = app_state  # type: ignore[attr-defined]
@@ -163,7 +167,7 @@ async def health_check():
 @app.post("/webhook")
 async def webhook_handler(
     request: Request,
-    strategy: Strategy = Depends(get_strategy),
+    strategy: Union[ClassicStrategy, StopStrategy] = Depends(get_strategy),
     allowed_ips: Set[str] = Depends(get_allowed_ips)
 ):
     """Webhook endpoint для приема сигналов от TradingView"""

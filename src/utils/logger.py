@@ -38,7 +38,7 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     logger.setLevel(level)
 
     formatter = MillisecondFormatter(
-        fmt='%(asctime)s | %(levelname)-8s | %(name)-30s | %(message)s',
+        fmt='%(asctime)s | %(levelname)-8s | %(name)-35s | %(message)s',
         datefmt='%d-%m-%y %H:%M:%S'
     )
 

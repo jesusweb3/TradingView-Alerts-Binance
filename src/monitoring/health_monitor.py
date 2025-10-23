@@ -2,12 +2,13 @@
 
 import asyncio
 import aiohttp
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, Union
 from datetime import datetime, timezone
 from src.utils.logger import get_logger
 
 if TYPE_CHECKING:
-    from src.strategies.strategy import Strategy
+    from src.strategies.options.classic_mode import ClassicStrategy
+    from src.strategies.options.stop_mode import StopStrategy
 
 logger = get_logger(__name__)
 
@@ -18,11 +19,11 @@ class HealthMonitor:
     def __init__(self):
         self.is_monitoring = False
         self.monitor_task: Optional[asyncio.Task] = None
-        self.strategy: Optional['Strategy'] = None
+        self.strategy: Optional[Union['ClassicStrategy', 'StopStrategy']] = None
         self.monitoring_interval = 600
         self.initial_delay = 10
 
-    def start_monitoring(self, strategy: 'Strategy'):
+    def start_monitoring(self, strategy: Union['ClassicStrategy', 'StopStrategy']):
         """Запускает мониторинг в async задаче"""
         if self.is_monitoring:
             return

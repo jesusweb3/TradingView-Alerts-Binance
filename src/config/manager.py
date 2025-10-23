@@ -135,13 +135,35 @@ class ConfigManager:
         }
 
     @lru_cache(maxsize=1)
+    def get_trading_option(self) -> str:
+        """
+        Возвращает выбранную торговую опцию с валидацией
+
+        Returns:
+            'classic' или 'stop'
+
+        Raises:
+            ValueError: Если указана неподдерживаемая опция
+        """
+        option = ConfigManager._validate_and_get(
+            'TRADING_OPTION',
+            str,
+            required=False,
+            default='classic'
+        ).lower()
+
+        valid_options = ['classic', 'stop']
+
+        if option not in valid_options:
+            raise ValueError(
+                f"TRADING_OPTION должна быть одной из {valid_options}, получено: {option}"
+            )
+
+        return option
+
+    @lru_cache(maxsize=1)
     def get_trailing_stop_config(self) -> dict:
         """Возвращает конфигурацию трейлинг стопа с валидацией"""
-        enabled = self._validate_and_get('TRAILING_STOP_ENABLED', bool, required=False, default=False)
-
-        if not enabled:
-            return {'enabled': False}
-
         activation_percent = ConfigManager._validate_and_get(
             'TRAILING_ACTIVATION_PERCENT',
             float,
@@ -159,7 +181,6 @@ class ConfigManager:
         )
 
         return {
-            'enabled': True,
             'activation_percent': activation_percent,
             'stop_percent': stop_percent
         }
@@ -190,6 +211,7 @@ class ConfigManager:
         self.get_binance_config.cache_clear()
         self.get_trading_config.cache_clear()
         self.get_server_config.cache_clear()
+        self.get_trading_option.cache_clear()
         self.get_trailing_stop_config.cache_clear()
         self.get_telegram_config.cache_clear()
 
