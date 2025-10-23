@@ -1,19 +1,16 @@
-# src/exchanges/binance/api.py
+# src/binance/api.py
 
 from binance import AsyncClient
 from binance.exceptions import BinanceAPIException
 from typing import Optional, Dict, Any, List
 from src.utils.logger import get_logger
-from ..retry_handler import retry_on_api_error
-from ..quantity_calculator import QuantityCalculator
+from src.utils.retry_handler import retry_on_api_error
 
 
-class BinanceClient(QuantityCalculator):
+class BinanceClient:
     """Async клиент для работы с Binance биржей"""
 
     def __init__(self, api_key: str, secret: str, position_size: float, leverage: int, symbol: str):
-        QuantityCalculator.__init__(self, leverage)
-
         self.name = "Binance"
         self.api_key = api_key
         self.secret = secret
@@ -23,6 +20,7 @@ class BinanceClient(QuantityCalculator):
 
         self.client: Optional[AsyncClient] = None
         self.symbol = symbol
+        self._instruments_info: Dict[str, Dict[str, Any]] = {}
 
     async def initialize(self):
         """Async инициализация клиента и символа"""
@@ -98,6 +96,124 @@ class BinanceClient(QuantityCalculator):
                 self.logger.error(f"Ошибка установки плеча для {symbol}: {e}")
         except Exception as e:
             self.logger.error(f"Ошибка установки плеча для {symbol}: {e}")
+
+    def calculate_quantity(self, symbol: str, position_size: float, current_price: float) -> float:
+        """
+        Вычисляет и округляет количество для торговли
+
+        Args:
+            symbol: Торговый символ
+            position_size: Размер позиции в валюте котировки
+            current_price: Текущая цена
+
+        Returns:
+            Округленное количество для торговли
+        """
+        total_value = position_size * self.leverage
+        raw_quantity = total_value / current_price
+        rounded_quantity = self.round_quantity(raw_quantity, symbol)
+
+        return rounded_quantity
+
+    def _round_value(self, value: float, symbol: str, value_type: str) -> float:
+        """
+        Универсальное округление для цены или количества
+
+        Args:
+            value: Значение для округления
+            symbol: Торговый символ
+            value_type: 'quantity' или 'price'
+
+        Returns:
+            Округленное значение
+        """
+        info = self._instruments_info.get(symbol)
+        if not info:
+            self.logger.warning(f"Информация об инструменте {symbol} не загружена, используем fallback")
+            return round(value, 3 if value_type == 'quantity' else 2)
+
+        if value_type == 'quantity':
+            step_key = 'qty_step'
+            precision_key = 'qty_precision'
+            fallback_precision = 3
+        else:
+            step_key = 'tick_size'
+            precision_key = 'price_precision'
+            fallback_precision = 2
+
+        step = info.get(step_key)
+        precision = info.get(precision_key)
+
+        if step:
+            precision_digits = len(str(step).split('.')[-1]) if '.' in str(step) else 0
+            rounded_value = round(value / step) * step
+            rounded_value = round(rounded_value, precision_digits)
+        elif precision is not None:
+            rounded_value = round(value, precision)
+        else:
+            rounded_value = round(value, fallback_precision)
+
+        if value_type == 'quantity':
+            min_qty = info.get('min_qty')
+            if min_qty and rounded_value < min_qty:
+                rounded_value = min_qty
+
+        return rounded_value
+
+    def round_quantity(self, quantity: float, symbol: str) -> float:
+        """
+        Округляет количество в соответствии с требованиями биржи
+
+        Args:
+            quantity: Исходное количество
+            symbol: Торговый символ
+
+        Returns:
+            Округленное количество
+        """
+        return self._round_value(quantity, symbol, 'quantity')
+
+    def round_price(self, price: float, symbol: str) -> float:
+        """
+        Округляет цену в соответствии с требованиями биржи
+
+        Args:
+            price: Исходная цена
+            symbol: Торговый символ
+
+        Returns:
+            Округленная цена
+        """
+        return self._round_value(price, symbol, 'price')
+
+    def validate_quantity(self, quantity: float, symbol: str) -> bool:
+        """
+        Проверяет что количество соответствует требованиям биржи
+
+        Args:
+            quantity: Количество для проверки
+            symbol: Торговый символ
+
+        Returns:
+            True если количество валидно
+        """
+        info = self._instruments_info.get(symbol)
+        if not info:
+            self.logger.warning(f"Информация об инструменте {symbol} не загружена, пропускаем валидацию")
+            return True
+
+        min_qty = info.get('min_qty')
+        max_qty = info.get('max_qty')
+
+        if min_qty and quantity < min_qty:
+            self.logger.error(f"Количество {quantity} меньше минимального {min_qty}")
+            return False
+
+        if max_qty and quantity > max_qty:
+            self.logger.error(f"Количество {quantity} больше максимального {max_qty}")
+            return False
+
+        return True
 
     @staticmethod
     def supports_fast_reverse() -> bool:
@@ -288,27 +404,55 @@ class BinanceClient(QuantityCalculator):
             self.logger.error(f"Ошибка отмены стоп ордера {order_id} для {symbol}: {e}")
             return False
 
-    async def open_long_position(self, symbol: str, position_size: float, current_price: float) -> bool:
-        """Открывает длинную позицию"""
-        return await self._open_position(symbol, "BUY", position_size, current_price)
+    async def open_long_position(self, symbol: str, quantity: float) -> bool:
+        """
+        Открывает длинную позицию с готовым количеством
 
-    async def open_short_position(self, symbol: str, position_size: float, current_price: float) -> bool:
-        """Открывает короткую позицию"""
-        return await self._open_position(symbol, "SELL", position_size, current_price)
+        Args:
+            symbol: Торговый символ
+            quantity: Рассчитанное количество
+
+        Returns:
+            True если позиция открыта успешно
+        """
+        return await self._open_position(symbol, "BUY", quantity)
+
+    async def open_short_position(self, symbol: str, quantity: float) -> bool:
+        """
+        Открывает короткую позицию с готовым количеством
+
+        Args:
+            symbol: Торговый символ
+            quantity: Рассчитанное количество
+
+        Returns:
+            True если позиция открыта успешно
+        """
+        return await self._open_position(symbol, "SELL", quantity)
 
     @retry_on_api_error()
-    async def _open_position(self, symbol: str, side: str, position_size: float, current_price: float) -> bool:
-        """Открывает позицию используя переданную цену из WebSocket"""
-        quantity = self.calculate_quantity(symbol, position_size, current_price)
+    async def _open_position(self, symbol: str, side: str, quantity: float) -> bool:
+        """
+        Открывает позицию с переданным количеством
 
-        if not self.validate_quantity(quantity, symbol):
+        Args:
+            symbol: Торговый символ
+            side: 'BUY' или 'SELL'
+            quantity: Рассчитанное и готовое количество
+
+        Returns:
+            True если успешно
+        """
+        rounded_quantity = self.round_quantity(quantity, symbol)
+
+        if not self.validate_quantity(rounded_quantity, symbol):
             return False
 
         await self.client.futures_create_order(
             symbol=symbol,
             side=side,
             type='MARKET',
-            quantity=quantity
+            quantity=rounded_quantity
         )
 
         return True

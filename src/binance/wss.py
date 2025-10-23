@@ -1,4 +1,4 @@
-# src/exchanges/binance/wss.py
+# src/binance/wss.py
 
 import json
 import asyncio

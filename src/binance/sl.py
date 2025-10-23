@@ -1,4 +1,4 @@
-# src/exchanges/binance/sl.py
+# src/binance/sl.py
 
 import asyncio
 from typing import Optional, Dict, Any

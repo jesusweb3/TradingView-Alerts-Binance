@@ -4,8 +4,8 @@ import asyncio
 from typing import Optional, Literal
 from src.utils.logger import get_logger
 from src.config.manager import config_manager
-from src.exchanges.binance.api import BinanceClient
-from src.exchanges.binance.wss import BinancePriceStream
+from src.binance.api import BinanceClient
+from src.binance.wss import BinancePriceStream
 
 logger = get_logger(__name__)
 
@@ -286,7 +286,17 @@ class ClassicStrategy:
             raise RuntimeError(f"Не удалось загрузить размер позиции из конфигурации: {e}")
 
     async def _open_new_position(self, action: Action, normalized_symbol: str, position_size: float) -> bool:
-        """Открывает новую позицию используя цену из WebSocket"""
+        """
+        Открывает новую позицию
+
+        Args:
+            action: 'buy' или 'sell'
+            normalized_symbol: Нормализованный символ
+            position_size: Размер позиции
+
+        Returns:
+            True если позиция открыта успешно
+        """
         current_price = await self.get_current_price()
 
         if current_price is None:
@@ -296,24 +306,20 @@ class ClassicStrategy:
                 return False
             logger.warning(f"Используем последнюю известную цену ${current_price:.2f}")
 
+        quantity = self.exchange.calculate_quantity(normalized_symbol, position_size, current_price)
+        self.last_quantity = quantity
+        logger.info(f"Расчет количества для {normalized_symbol}: {quantity}")
+
         if action == "buy":
-            success = await self.exchange.open_long_position(
-                normalized_symbol, position_size, current_price
-            )
+            success = await self.exchange.open_long_position(normalized_symbol, quantity)
             direction = "Long"
         else:
-            success = await self.exchange.open_short_position(
-                normalized_symbol, position_size, current_price
-            )
+            success = await self.exchange.open_short_position(normalized_symbol, quantity)
             direction = "Short"
 
         if not success:
             logger.error(f"Не удалось открыть {direction} позицию {normalized_symbol}")
             return False
-
-        new_quantity = self.exchange.calculate_quantity(normalized_symbol, position_size, current_price)
-        self.last_quantity = new_quantity
-        logger.info(f"Сохранен last_quantity: {self.last_quantity}")
 
         entry_price = await self.exchange.get_exact_entry_price(normalized_symbol)
         if entry_price:
