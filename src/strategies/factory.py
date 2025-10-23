@@ -1,9 +1,9 @@
-# src/strategies/options/factory.py
+# src/strategies/factory.py
 
 from typing import Union
 from src.config.manager import config_manager
-from src.strategies.options.classic_mode import ClassicStrategy
-from src.strategies.options.stop_mode import StopStrategy
+from src.strategies.classic_strategy import ClassicStrategy
+from src.strategies.stop_strategy import StopStrategy
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)

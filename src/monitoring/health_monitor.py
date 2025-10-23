@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from src.utils.logger import get_logger
 
 if TYPE_CHECKING:
-    from src.strategies.options.classic_mode import ClassicStrategy
-    from src.strategies.options.stop_mode import StopStrategy
+    from src.strategies.classic_strategy import ClassicStrategy
+    from src.strategies.stop_strategy import StopStrategy
 
 logger = get_logger(__name__)
 

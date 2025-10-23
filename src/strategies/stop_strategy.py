@@ -1,10 +1,11 @@
-# src/strategies/options/classic_mode.py
+# src/strategies/stop_strategy.py
 
 import asyncio
 from typing import Optional, Literal
 from src.utils.logger import get_logger
 from src.config.manager import config_manager
 from src.binance.api import BinanceClient
+from src.binance.sl import StopManager
 from src.binance.wss import BinancePriceStream
 
 logger = get_logger(__name__)
@@ -12,8 +13,8 @@ logger = get_logger(__name__)
 Action = Literal["buy", "sell"]
 
 
-class ClassicStrategy:
-    """Классическая торговая стратегия без стопов"""
+class StopStrategy:
+    """Торговая стратегия с трейлинг-стопами"""
 
     def __init__(self):
         binance_config = config_manager.get_binance_config()
@@ -34,6 +35,8 @@ class ClassicStrategy:
         self.current_price: Optional[float] = None
         self._price_lock = asyncio.Lock()
 
+        self.stop_manager = StopManager(self.exchange)
+
         self.price_stream: Optional[BinancePriceStream] = None
         self._initialized = False
 
@@ -50,7 +53,7 @@ class ClassicStrategy:
         await self._restore_state_after_restart()
 
         self._initialized = True
-        logger.info("Классическая стратегия инициализирована")
+        logger.info("Стратегия со стопами инициализирована")
 
     def _on_price_update(self, price: float):
         """
@@ -74,6 +77,8 @@ class ClassicStrategy:
         try:
             async with self._price_lock:
                 self.current_price = price
+
+            await self.stop_manager.check_price_and_activate(price)
         except Exception as e:
             logger.error(f"Ошибка обработки обновления цены {price}: {e}")
 
@@ -100,8 +105,10 @@ class ClassicStrategy:
 
         Логика:
         1. Проверяет есть ли открытая позиция
-        2. Устанавливает last_action на основе направления позиции
-        3. Восстанавливает last_quantity из текущей позиции
+        2. Проверяет есть ли активные стоп-ордера
+        3. Если позиция есть, стопа нет → восстанавливает мониторинг
+        4. Устанавливает last_action на основе направления позиции
+        5. Восстанавливает last_quantity из текущей позиции
         """
         try:
             normalized_symbol = self.exchange.normalize_symbol(self.symbol)
@@ -116,7 +123,27 @@ class ClassicStrategy:
 
             self.last_action = "buy" if current_position['side'] == "Buy" else "sell"
             self.last_quantity = current_position['size']
-            logger.info(f"Восстановлен last_action={self.last_action}, last_quantity={self.last_quantity}")
+            logger.info(f"Восстановлен last_quantity: {self.last_quantity}")
+
+            open_orders = await self.exchange.get_open_orders(normalized_symbol)
+
+            has_stop_order = any(
+                order.get('type') == 'STOP' and order.get('reduceOnly', False)
+                for order in open_orders
+            )
+
+            if has_stop_order:
+                logger.info("Обнаружен активный стоп-ордер, восстановление не требуется")
+                return
+
+            logger.info("Стоп-ордер не обнаружен, восстанавливаем мониторинг стопа")
+
+            entry_price = current_position['entry_price']
+            position_side = current_position['side']
+
+            self.stop_manager.start_monitoring(normalized_symbol, entry_price, position_side)
+
+            logger.info(f"Мониторинг стопа успешно восстановлен для {position_side} позиции")
 
         except Exception as e:
             logger.error(f"Ошибка восстановления состояния после перезапуска: {e}")
@@ -181,7 +208,7 @@ class ClassicStrategy:
         Returns:
             Словарь с результатом обработки или None если сигнал не обработан
         """
-        action = ClassicStrategy.parse_message(message)
+        action = StopStrategy.parse_message(message)
         if not action:
             logger.info("Сигнал не распознан")
             return None
@@ -204,16 +231,20 @@ class ClassicStrategy:
 
     async def process_signal(self, action: Action) -> bool:
         """
-        Обрабатывает торговый сигнал
+        Обрабатывает торговый сигнал с учетом стопа
 
         Логика:
-        1. Получаем символ из конфигурации
-        2. Проверяем текущую позицию на бирже
-        3. Если позиции нет - открываем новую
-        4. Если есть позиция в том же направлении - игнорируем
-        5. Если есть позиция в противоположном направлении - разворачиваем
+        1. Отменяем активный стоп перед любой операцией
+        2. Получаем символ из конфигурации
+        3. Проверяем текущую позицию на бирже
+        4. Если позиции нет - открываем новую
+        5. Если есть позиция в том же направлении - игнорируем
+        6. Если есть позиция в противоположном направлении - разворачиваем
+        7. После успешной операции - запускаем мониторинг стопа
         """
         try:
+            await self.stop_manager.cancel_active_stop()
+
             normalized_symbol = self.exchange.normalize_symbol(self.symbol)
             current_position = await self.exchange.get_current_position(normalized_symbol)
             position_size = self._get_position_size()
@@ -224,6 +255,9 @@ class ClassicStrategy:
                 success = await self._handle_no_position(action, normalized_symbol, position_size)
             else:
                 success = await self._handle_existing_position(action, current_position, normalized_symbol, position_size)
+
+            if success:
+                await self._start_stop_monitoring(action, normalized_symbol)
 
             return success
 
@@ -270,6 +304,26 @@ class ClassicStrategy:
             return True
 
         return await self._reverse_position(normalized_symbol, position_size)
+
+    async def _start_stop_monitoring(self, action: Action, normalized_symbol: str):
+        """
+        Запускает мониторинг стопа после успешной торговой операции
+
+        Args:
+            action: Торговый сигнал
+            normalized_symbol: Нормализованный символ
+        """
+        try:
+            entry_price = await self.exchange.get_exact_entry_price(normalized_symbol)
+
+            if entry_price:
+                position_side = 'Buy' if action == "buy" else 'Sell'
+                self.stop_manager.start_monitoring(normalized_symbol, entry_price, position_side)
+            else:
+                logger.warning(f"Не удалось получить цену входа для {normalized_symbol}")
+
+        except Exception as e:
+            logger.error(f"Ошибка запуска мониторинга стопа: {e}")
 
     @staticmethod
     def _get_position_size() -> float:
@@ -333,7 +387,7 @@ class ClassicStrategy:
 
         Args:
             normalized_symbol: Нормализованный символ
-            position_size: Размер позиции из конфига
+            position_size: Размер позиции из конфика
 
         Returns:
             True если разворот успешен, False иначе
@@ -368,15 +422,18 @@ class ClassicStrategy:
     async def cleanup(self):
         """Очистка ресурсов при завершении стратегии"""
         try:
-            logger.info("Начинается очистка ресурсов классической стратегии...")
+            logger.info("Начинается очистка ресурсов стратегии со стопами...")
 
             if self.price_stream:
                 self.price_stream.stop()
 
+            if self.stop_manager:
+                self.stop_manager.stop_monitoring()
+
             if self.exchange:
                 await self.exchange.close()
 
-            logger.info("Очистка ресурсов классической стратегии завершена")
+            logger.info("Очистка ресурсов стратегии со стопами завершена")
 
         except Exception as e:
             logger.error(f"Ошибка при очистке ресурсов стратегии: {e}")
@@ -384,7 +441,7 @@ class ClassicStrategy:
     def get_status(self) -> dict:
         """Возвращает текущий статус стратегии"""
         status = {
-            'mode': 'classic',
+            'mode': 'stop',
             'exchange': self.exchange.name,
             'symbol': self.symbol,
             'last_action': self.last_action,
@@ -405,5 +462,12 @@ class ClassicStrategy:
             }
             if 'current_downtime_seconds' in ws_stats:
                 status['websocket']['current_downtime_seconds'] = ws_stats['current_downtime_seconds']
+
+        if self.stop_manager:
+            status['stop_info'] = {
+                'monitoring': self.stop_manager.is_monitoring(),
+                'has_active_stop': self.stop_manager.has_active_stop(),
+                'stop_details': self.stop_manager.get_stop_info()
+            }
 
         return status
