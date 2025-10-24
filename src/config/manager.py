@@ -135,31 +135,31 @@ class ConfigManager:
         }
 
     @lru_cache(maxsize=1)
-    def get_trading_option(self) -> str:
+    def get_trading_strategy(self) -> str:
         """
-        Возвращает выбранную торговую опцию с валидацией
+        Возвращает выбранную торговую стратегию с валидацией
 
         Returns:
             'classic' или 'stop'
 
         Raises:
-            ValueError: Если указана неподдерживаемая опция
+            ValueError: Если указана неподдерживаемая стратегия
         """
-        option = ConfigManager._validate_and_get(
-            'TRADING_OPTION',
+        strategy = ConfigManager._validate_and_get(
+            'TRADING_STRATEGY',
             str,
             required=False,
             default='classic'
         ).lower()
 
-        valid_options = ['classic', 'stop']
+        valid_strategies = ['classic', 'stop']
 
-        if option not in valid_options:
+        if strategy not in valid_strategies:
             raise ValueError(
-                f"TRADING_OPTION должна быть одной из {valid_options}, получено: {option}"
+                f"TRADING_STRATEGY должна быть одной из {valid_strategies}, получено: {strategy}"
             )
 
-        return option
+        return strategy
 
     @lru_cache(maxsize=1)
     def get_trailing_stop_config(self) -> dict:
@@ -211,7 +211,7 @@ class ConfigManager:
         self.get_binance_config.cache_clear()
         self.get_trading_config.cache_clear()
         self.get_server_config.cache_clear()
-        self.get_trading_option.cache_clear()
+        self.get_trading_strategy.cache_clear()
         self.get_trailing_stop_config.cache_clear()
         self.get_telegram_config.cache_clear()
 

@@ -79,9 +79,9 @@ async def initialize_app():
         trading_config = config_manager.get_trading_config()
         symbol = trading_config['symbol']
 
-        trading_option = config_manager.get_trading_option()
+        trading_strategy = config_manager.get_trading_strategy()
 
-        if trading_option == "stop":
+        if trading_strategy == "stop":
             stop_config = config_manager.get_trailing_stop_config()
             logger.info(f"Актив: {symbol} со стопами: активация {stop_config['activation_percent']}%, "
                         f"стоп {stop_config['stop_percent']}%")

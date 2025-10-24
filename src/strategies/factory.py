@@ -14,18 +14,18 @@ def create_strategy() -> Union[ClassicStrategy, StopStrategy]:
     Создает экземпляр стратегии на основе конфигурации
 
     Returns:
-        ClassicStrategy или StopStrategy в зависимости от TRADING_OPTION
+        ClassicStrategy или StopStrategy в зависимости от TRADING_STRATEGY
 
     Raises:
-        ValueError: Если указана неподдерживаемая торговая опция
+        ValueError: Если указана неподдерживаемая торговая стратегия
     """
-    trading_option = config_manager.get_trading_option()
+    trading_strategy = config_manager.get_trading_strategy()
 
-    if trading_option == "classic":
+    if trading_strategy == "classic":
         logger.info("Создана классическая стратегия (без стопов)")
         return ClassicStrategy()
-    elif trading_option == "stop":
+    elif trading_strategy == "stop":
         logger.info("Создана стратегия со стопами")
         return StopStrategy()
     else:
-        raise ValueError(f"Неподдерживаемая торговая опция: {trading_option}")
+        raise ValueError(f"Неподдерживаемая торговая стратегия: {trading_strategy}")
