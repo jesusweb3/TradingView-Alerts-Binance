@@ -2,7 +2,7 @@
 
 import asyncio
 from typing import Optional, Dict, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from src.utils.logger import get_logger
 from src.config.manager import config_manager
 
@@ -17,7 +17,9 @@ class PendingHedge:
     main_position_side: str
     activation_pnl_target: float
     sl_pnl_target: float
-    tp_pnl_target: float
+    activation_pnl: float
+    sl_pnl: float
+    tp_pnl: float
 
 
 @dataclass
@@ -30,8 +32,11 @@ class ActiveHedge:
     hedge_sl_price: float
     main_twx: float
     main_position_side: str
-    sl_pnl_target: float
-    tp_pnl_target: float
+    activation_pnl: float
+    sl_pnl: float
+    tp_pnl: float
+    leverage: int
+    breakeven_sl_active: bool = field(default=False)
 
 
 class HedgeManager:
@@ -75,20 +80,18 @@ class HedgeManager:
         if position_side == 'Buy':
             activation_price = main_twx * (1 + (activation_pnl / (100 * self.leverage)))
             sl_price = main_twx * (1 + (sl_pnl / (100 * self.leverage)))
-            tp_price = main_twx * (1 + (tp_pnl / (100 * self.leverage)))
         else:
             activation_price = main_twx * (1 - (activation_pnl / (100 * self.leverage)))
             sl_price = main_twx * (1 - (sl_pnl / (100 * self.leverage)))
-            tp_price = main_twx * (1 - (tp_pnl / (100 * self.leverage)))
 
         self.monitoring_active = True
         self.hedge_can_be_triggered_again = False
 
         self.logger.info(
             f"Мониторинг хеджирования: основная {position_side} по {main_twx:.2f}. "
-            f"Активация хеджа при PnL {activation_pnl}% (цена {activation_price:.2f}). "
-            f"Первый SL {sl_pnl}% (цена {sl_price:.2f}). "
-            f"БУ уровень {tp_pnl}% (цена {tp_price:.2f})"
+            f"Активация хеджа при основной PnL {activation_pnl}% (цена {activation_price:.2f}). "
+            f"Первый SL хеджа при основной PnL {sl_pnl}% (цена {sl_price:.2f}). "
+            f"Перенос SL в БУ при хедж PnL +{tp_pnl}%"
         )
 
         self.pending_hedge = PendingHedge(
@@ -97,7 +100,9 @@ class HedgeManager:
             main_position_side=position_side,
             activation_pnl_target=activation_price,
             sl_pnl_target=sl_price,
-            tp_pnl_target=tp_price
+            activation_pnl=activation_pnl,
+            sl_pnl=sl_pnl,
+            tp_pnl=tp_pnl
         )
 
     async def check_price_and_activate(self, current_price: float):
@@ -170,11 +175,13 @@ class HedgeManager:
                     hedge_sl_price=stop_price,
                     main_twx=pending.main_twx,
                     main_position_side=pending.main_position_side,
-                    sl_pnl_target=pending.sl_pnl_target,
-                    tp_pnl_target=pending.tp_pnl_target
+                    activation_pnl=pending.activation_pnl,
+                    sl_pnl=pending.sl_pnl,
+                    tp_pnl=pending.tp_pnl,
+                    leverage=self.leverage
                 )
                 self.pending_hedge = None
-                self.logger.info(f"Хедж размещен: {hedge_side} {quantity} на {signal_price:.2f}, SL {stop_price:.2f}")
+                self.logger.info(f"Хедж размещен: {hedge_side} {quantity} по {signal_price:.2f}, первый SL {stop_price:.2f}")
 
         except Exception as e:
             self.logger.error(f"Ошибка размещения хеджа: {e}")
@@ -201,7 +208,7 @@ class HedgeManager:
             hedge.hedge_position_side
         )
 
-        if hedge_pnl_percent >= trigger_pnl:
+        if hedge_pnl_percent >= trigger_pnl and not hedge.breakeven_sl_active:
             self.logger.info(f"Хедж достиг +{hedge_pnl_percent:.2f}%, переносим SL в БУ")
             await self._move_sl_to_breakeven(hedge)
 
@@ -227,13 +234,18 @@ class HedgeManager:
 
     async def _move_sl_to_breakeven(self, hedge: ActiveHedge):
         """
-        Переносит SL хеджа в БУ
+        Переносит SL хеджа в БУ на уровне tp_pnl% профита от точки входа хеджа
 
         Args:
             hedge: Активный хедж
         """
         try:
-            breakeven_price = hedge.hedge_twx
+            if hedge.hedge_position_side == 'SHORT':
+                breakeven_price = hedge.hedge_twx * (1 - (hedge.tp_pnl / (100 * hedge.leverage)))
+            else:
+                breakeven_price = hedge.hedge_twx * (1 + (hedge.tp_pnl / (100 * hedge.leverage)))
+
+            self.logger.info(f"Рассчитанная цена БУ для хеджа: ${breakeven_price:.2f} (PnL +{hedge.tp_pnl}%)")
 
             success = await self.exchange_client.update_stop_loss(
                 symbol=hedge.symbol,
@@ -242,8 +254,9 @@ class HedgeManager:
             )
 
             if success:
-                self.active_hedge.hedge_sl_price = breakeven_price
-                self.logger.info(f"SL перенесен в БУ на {breakeven_price:.2f}")
+                hedge.hedge_sl_price = breakeven_price
+                hedge.breakeven_sl_active = True
+                self.logger.info(f"SL хеджа перенесен в БУ на {breakeven_price:.2f}")
 
         except Exception as e:
             self.logger.error(f"Ошибка переноса SL в БУ: {e}")
@@ -273,7 +286,7 @@ class HedgeManager:
 
     async def _process_hedge_closure(self, hedge: ActiveHedge):
         """
-        Обрабатывает закрытие хеджа
+        Обрабатывает закрытие хеджа и определяет убыточность
 
         Args:
             hedge: Закрытый хедж
@@ -281,28 +294,15 @@ class HedgeManager:
         config = config_manager.get_hedging_config()
         max_failures = config['max_failures']
 
-        current_pnl_percent = self._calculate_pnl(
-            hedge.hedge_twx,
-            self._get_last_known_price(),
-            hedge.hedge_position_side
-        )
-
-        if current_pnl_percent < 0:
+        if hedge.breakeven_sl_active:
+            self.logger.info(f"Хедж закрыт по второму SL (БУ/профит)")
+        else:
             self.failed_hedges_count += 1
-            self.logger.warning(f"Хедж закрыт с убытком ({current_pnl_percent:.2f}%). "
-                               f"Всего неудач: {self.failed_hedges_count}")
+            self.logger.warning(f"Хедж закрыт по первому SL (убыток). Неудач: {self.failed_hedges_count}")
 
             if self.failed_hedges_count >= max_failures:
                 self.hedging_enabled = False
                 self.logger.error(f"Хеджирование отключено: {self.failed_hedges_count} неудач (максимум: {max_failures})")
-        else:
-            self.logger.info(f"Хедж закрыт с прибылью ({current_pnl_percent:.2f}%). "
-                           f"Счетчик неудач остается: {self.failed_hedges_count}")
-
-    @staticmethod
-    def _get_last_known_price() -> float:
-        """Получает последнюю известную цену из стратегии"""
-        return 0.0
 
     def check_main_pnl_crossed_activation(self, current_price: float) -> bool:
         """
@@ -357,7 +357,8 @@ class HedgeManager:
                 'symbol': hedge.symbol,
                 'position_side': hedge.hedge_position_side,
                 'hedge_twx': hedge.hedge_twx,
-                'current_sl': hedge.hedge_sl_price
+                'current_sl': hedge.hedge_sl_price,
+                'breakeven_sl_active': hedge.breakeven_sl_active
             }
 
         return status

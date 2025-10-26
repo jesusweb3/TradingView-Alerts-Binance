@@ -113,7 +113,7 @@ class HedgingStrategy:
     async def _process_hedge_closed(self):
         """Обрабатывает закрытие хеджа"""
         if not self.hedge_manager.hedging_enabled:
-            logger.warning("Хеджирование отключено после 2-х неудач")
+            logger.warning("Хеджирование отключено после неудач")
 
     async def get_current_price(self) -> Optional[float]:
         """
@@ -305,7 +305,7 @@ class HedgingStrategy:
         return True
 
     async def _handle_existing_position(self, action: Action, current_position: dict,
-                                       normalized_symbol: str) -> bool:
+                                        normalized_symbol: str) -> bool:
         """
         Обрабатывает сигнал когда позиция уже открыта
 
@@ -332,9 +332,7 @@ class HedgingStrategy:
 
     async def _handle_signal_change(self, action: Action, current_position: dict, normalized_symbol: str) -> bool:
         """
-        Обрабатывает смену сигнала (противоположное направление)
-
-        Логика сценария 4: закрыть основную, оставить хедж, хедж становится новой основной
+        Обрабатывает смену сигнала: закрыть старую позицию, открыть новую
 
         Args:
             action: Новый торговый сигнал
@@ -346,13 +344,13 @@ class HedgingStrategy:
         """
         logger.info(f"Смена сигнала: текущая {current_position['side']}, новая {action}")
 
-        current_price = await self.get_current_price()
-        if current_price is None:
-            logger.error("Цена недоступна для смены сигнала")
-            return False
-
         try:
-            await self.hedge_manager.stop_monitoring()
+            current_price = await self.get_current_price()
+            if current_price is None:
+                logger.error("Цена недоступна для смены сигнала")
+                return False
+
+            self.hedge_manager.stop_monitoring()
 
             if self.hedge_manager.active_hedge:
                 hedge = self.hedge_manager.active_hedge
@@ -362,27 +360,50 @@ class HedgingStrategy:
                 )
                 logger.info(f"Отменены все стопы хеджа {hedge.hedge_position_side}")
 
+            position_size = self._get_position_size()
+
+            position_side_to_close = 'LONG' if current_position['side'] == "Buy" else 'SHORT'
             opposite_side = "SELL" if current_position['side'] == "Buy" else "BUY"
             rounded_size = self.exchange.round_quantity(current_position['size'], normalized_symbol)
+
+            logger.info(f"Закрываем {position_side_to_close} позицию через {opposite_side} ордер")
 
             await self.exchange.client.futures_create_order(
                 symbol=normalized_symbol,
                 side=opposite_side,
                 type='MARKET',
                 quantity=rounded_size,
+                positionSide=position_side_to_close,
                 reduceOnly=True
             )
 
-            logger.info(f"Закрыта позиция {current_position['side']}")
+            logger.info(f"Закрыта {current_position['side']} позиция")
+
+            await asyncio.sleep(0.2)
+
+            new_quantity = self.exchange.calculate_quantity(normalized_symbol, position_size, current_price)
+            new_position_side = 'SHORT' if action == "sell" else 'LONG'
+            new_side = 'SELL' if action == "sell" else 'BUY'
+
+            logger.info(f"Открываем {new_position_side} позицию через {new_side} ордер, объем {new_quantity}")
+
+            await self.exchange.client.futures_create_order(
+                symbol=normalized_symbol,
+                side=new_side,
+                type='MARKET',
+                quantity=new_quantity,
+                positionSide=new_position_side
+            )
+
+            position_side_str = 'Buy' if action == "buy" else 'Sell'
+            logger.info(f"Открыта новая {position_side_str} позиция по {current_price:.2f}")
 
             self.main_twx = current_price
             self.hedge_manager.reset_for_new_signal()
             self.hedge_manager.hedging_enabled = True
 
-            position_side = 'Buy' if action == "buy" else 'Sell'
-            self.hedge_manager.start_monitoring(normalized_symbol, self.main_twx, position_side)
+            self.hedge_manager.start_monitoring(normalized_symbol, self.main_twx, position_side_str)
 
-            logger.info(f"Новая основная позиция: {position_side} по {current_price:.2f}")
             return True
 
         except Exception as e:

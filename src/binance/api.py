@@ -707,12 +707,13 @@ class BinanceClient:
 
     @retry_on_api_error()
     async def close_position(self, symbol: str) -> bool:
-        """Закрывает текущую позицию по символу"""
+        """Закрывает текущую позицию по символу с поддержкой HEDGE MODE"""
         position = await self.get_current_position(symbol)
         if not position:
             return True
 
         opposite_side = "SELL" if position['side'] == "Buy" else "BUY"
+        position_side = 'LONG' if position['side'] == "Buy" else 'SHORT'
         rounded_size = self.round_quantity(position['size'], symbol)
 
         await self.client.futures_create_order(
@@ -720,6 +721,7 @@ class BinanceClient:
             side=opposite_side,
             type='MARKET',
             quantity=rounded_size,
+            positionSide=position_side,
             reduceOnly=True
         )
 
