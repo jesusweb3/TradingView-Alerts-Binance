@@ -140,7 +140,7 @@ class ConfigManager:
         Возвращает выбранную торговую стратегию с валидацией
 
         Returns:
-            'classic' или 'stop'
+            'classic', 'stop' или 'hedging'
 
         Raises:
             ValueError: Если указана неподдерживаемая стратегия
@@ -152,7 +152,7 @@ class ConfigManager:
             default='classic'
         ).lower()
 
-        valid_strategies = ['classic', 'stop']
+        valid_strategies = ['classic', 'stop', 'hedging']
 
         if strategy not in valid_strategies:
             raise ValueError(
@@ -186,6 +186,58 @@ class ConfigManager:
         }
 
     @lru_cache(maxsize=1)
+    def get_hedging_config(self) -> dict:
+        """Возвращает конфигурацию hedging стратегии с валидацией"""
+        activation_pnl = ConfigManager._validate_and_get(
+            'HEDGING_ACTIVATION_PNL',
+            float,
+            required=True,
+            min_value=-100.0,
+            max_value=0.0
+        )
+
+        sl_pnl = ConfigManager._validate_and_get(
+            'HEDGING_SL_PNL',
+            float,
+            required=True,
+            min_value=-100.0,
+            max_value=0.0
+        )
+
+        trigger_pnl = ConfigManager._validate_and_get(
+            'HEDGING_TRIGGER_PNL',
+            float,
+            required=True,
+            min_value=0.0,
+            max_value=100.0
+        )
+
+        tp_pnl = ConfigManager._validate_and_get(
+            'HEDGING_TP_PNL',
+            float,
+            required=True,
+            min_value=0.0,
+            max_value=100.0
+        )
+
+        max_failures = ConfigManager._validate_and_get(
+            'HEDGING_MAX_FAILURES',
+            int,
+            required=False,
+            default=2,
+            min_value=1,
+            max_value=10
+        )
+
+        return {
+            'activation_pnl': activation_pnl,
+            'sl_pnl': sl_pnl,
+            'trigger_pnl': trigger_pnl,
+            'tp_pnl': tp_pnl,
+            'max_failures': max_failures
+        }
+
+    @lru_cache(maxsize=1)
     def get_telegram_config(self) -> dict:
         """Возвращает конфигурацию Telegram с валидацией"""
         bot_token = ConfigManager._validate_and_get('TELEGRAM_BOT_TOKEN', str, required=True)
@@ -213,6 +265,7 @@ class ConfigManager:
         self.get_server_config.cache_clear()
         self.get_trading_strategy.cache_clear()
         self.get_trailing_stop_config.cache_clear()
+        self.get_hedging_config.cache_clear()
         self.get_telegram_config.cache_clear()
 
 

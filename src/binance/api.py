@@ -97,6 +97,201 @@ class BinanceClient:
         except Exception as e:
             self.logger.error(f"Ошибка установки плеча для {symbol}: {e}")
 
+    @retry_on_api_error()
+    async def enable_hedge_mode(self) -> bool:
+        """
+        Включает режим хеджирования если он отключен
+
+        Returns:
+            True если режим включен или уже был включен
+        """
+        try:
+            current_mode = await self.client.futures_get_position_mode()
+            is_hedge_enabled = current_mode.get('dualSidePosition', False)
+
+            if is_hedge_enabled:
+                self.logger.info(f"Режим хеджирования уже включен")
+                return True
+
+            await self.client.futures_change_position_mode(dualSidePosition='true')
+            self.logger.info(f"Режим хеджирования успешно включен")
+            return True
+
+        except BinanceAPIException as e:
+            if "No need to change position side" in str(e):
+                self.logger.info(f"Режим хеджирования уже включен")
+                return True
+            elif "Modify Hedge mode is not allowed" in str(e):
+                self.logger.error("Нельзя сменить режим — есть открытые позиции или ордера")
+                return False
+            else:
+                self.logger.error(f"Binance API ошибка: {e}")
+                return False
+        except Exception as e:
+            self.logger.error(f"Ошибка включения режима хеджирования: {e}")
+            return False
+
+    @retry_on_api_error()
+    async def open_position_with_sl(self, symbol: str, side: str, quantity: float,
+                                    stop_price: float, position_side: str = 'LONG') -> Optional[Dict[str, Any]]:
+        """
+        Открывает позицию рыночным ордером со встроенным стоп лоссом
+
+        Args:
+            symbol: Торговый символ
+            side: 'BUY' или 'SELL'
+            quantity: Количество
+            stop_price: Цена активации стопа
+            position_side: 'LONG' или 'SHORT'
+
+        Returns:
+            Результат размещения основного ордера или None при ошибке
+        """
+        try:
+            rounded_quantity = self.round_quantity(quantity, symbol)
+            rounded_stop_price = self.round_price(stop_price, symbol)
+
+            if not self.validate_quantity(rounded_quantity, symbol):
+                return None
+
+            sl_side = 'SELL' if side == 'BUY' else 'BUY'
+
+            main_order = await self.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type='MARKET',
+                quantity=rounded_quantity,
+                positionSide=position_side
+            )
+
+            self.logger.info(f"Ордер открыт: {main_order['orderId']}")
+
+            sl_order = await self.client.futures_create_order(
+                symbol=symbol,
+                side=sl_side,
+                type='STOP_MARKET',
+                stopPrice=rounded_stop_price,
+                positionSide=position_side,
+                closePosition=True,
+                timeInForce='GTE_GTC',
+                workingType='MARK_PRICE',
+                priceProtect=True
+            )
+
+            self.logger.info(f"SL установлен на {rounded_stop_price}: {sl_order['orderId']}")
+            return main_order
+
+        except BinanceAPIException as e:
+            self.logger.error(f"Binance API ошибка открытия позиции со SL: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Ошибка открытия позиции со SL для {symbol}: {e}")
+            return None
+
+    @retry_on_api_error()
+    async def update_stop_loss(self, symbol: str, new_stop_price: float,
+                               position_side: str = 'LONG') -> bool:
+        """
+        Отменяет старый стоп лосс и выставляет новый
+
+        Args:
+            symbol: Торговый символ
+            new_stop_price: Новая цена стопа
+            position_side: 'LONG' или 'SHORT'
+
+        Returns:
+            True если стоп успешно обновлен
+        """
+        try:
+            sl_side = 'SELL' if position_side == 'LONG' else 'BUY'
+            rounded_stop_price = self.round_price(new_stop_price, symbol)
+
+            open_orders = await self.client.futures_get_open_orders(symbol=symbol)
+
+            old_sl_found = False
+            for order in open_orders:
+                if (order['type'] == 'STOP_MARKET' and
+                        order['side'] == sl_side and
+                        order['positionSide'] == position_side):
+
+                    await self.client.futures_cancel_order(
+                        symbol=symbol,
+                        orderId=order['orderId']
+                    )
+                    self.logger.info(f"Старый SL отменён: {order['stopPrice']}")
+                    old_sl_found = True
+                    break
+
+            if not old_sl_found:
+                self.logger.warning(f"Старый SL не найден для {symbol} {position_side}")
+                return False
+
+            new_sl = await self.client.futures_create_order(
+                symbol=symbol,
+                side=sl_side,
+                type='STOP_MARKET',
+                stopPrice=rounded_stop_price,
+                positionSide=position_side,
+                closePosition=True,
+                timeInForce='GTE_GTC',
+                workingType='MARK_PRICE',
+                priceProtect=True
+            )
+
+            self.logger.info(f"Новый SL установлен на {rounded_stop_price}: {new_sl['orderId']}")
+            return True
+
+        except BinanceAPIException as e:
+            self.logger.error(f"Binance API ошибка обновления SL: {e}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Ошибка обновления SL для {symbol}: {e}")
+            return False
+
+    @retry_on_api_error()
+    async def cancel_all_hedge_stops(self, symbol: str, position_side: str = 'LONG') -> bool:
+        """
+        Отменяет все стоп ордера для позиции хеджирования
+
+        Args:
+            symbol: Торговый символ
+            position_side: 'LONG' или 'SHORT'
+
+        Returns:
+            True если все стопы отменены успешно
+        """
+        try:
+            open_orders = await self.client.futures_get_open_orders(symbol=symbol)
+
+            sl_side = 'SELL' if position_side == 'LONG' else 'BUY'
+            cancelled_count = 0
+
+            for order in open_orders:
+                if (order['type'] == 'STOP_MARKET' and
+                        order['side'] == sl_side and
+                        order['positionSide'] == position_side):
+
+                    await self.client.futures_cancel_order(
+                        symbol=symbol,
+                        orderId=order['orderId']
+                    )
+                    self.logger.info(f"Отменён стоп ордер {order['orderId']} на {order['stopPrice']}")
+                    cancelled_count += 1
+
+            if cancelled_count > 0:
+                self.logger.info(f"Отменено {cancelled_count} стоп ордеров для {symbol} {position_side}")
+                return True
+            else:
+                self.logger.warning(f"Стоп ордеров для {symbol} {position_side} не найдено")
+                return True
+
+        except BinanceAPIException as e:
+            self.logger.error(f"Binance API ошибка отмены стопов: {e}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Ошибка отмены стопов для {symbol}: {e}")
+            return False
+
     def calculate_quantity(self, symbol: str, position_size: float, current_price: float) -> float:
         """
         Вычисляет и округляет количество для торговли
@@ -404,34 +599,36 @@ class BinanceClient:
             self.logger.error(f"Ошибка отмены стоп ордера {order_id} для {symbol}: {e}")
             return False
 
-    async def open_long_position(self, symbol: str, quantity: float) -> bool:
+    async def open_long_position(self, symbol: str, quantity: float, position_side: Optional[str] = None) -> bool:
         """
         Открывает длинную позицию с готовым количеством
 
         Args:
             symbol: Торговый символ
             quantity: Рассчитанное количество
+            position_side: 'LONG' для хеджирования, None для ONE-WAY
 
         Returns:
             True если позиция открыта успешно
         """
-        return await self._open_position(symbol, "BUY", quantity)
+        return await self._open_position(symbol, "BUY", quantity, position_side)
 
-    async def open_short_position(self, symbol: str, quantity: float) -> bool:
+    async def open_short_position(self, symbol: str, quantity: float, position_side: Optional[str] = None) -> bool:
         """
         Открывает короткую позицию с готовым количеством
 
         Args:
             symbol: Торговый символ
             quantity: Рассчитанное количество
+            position_side: 'SHORT' для хеджирования, None для ONE-WAY
 
         Returns:
             True если позиция открыта успешно
         """
-        return await self._open_position(symbol, "SELL", quantity)
+        return await self._open_position(symbol, "SELL", quantity, position_side)
 
     @retry_on_api_error()
-    async def _open_position(self, symbol: str, side: str, quantity: float) -> bool:
+    async def _open_position(self, symbol: str, side: str, quantity: float, position_side: Optional[str] = None) -> bool:
         """
         Открывает позицию с переданным количеством
 
@@ -439,6 +636,7 @@ class BinanceClient:
             symbol: Торговый символ
             side: 'BUY' или 'SELL'
             quantity: Рассчитанное и готовое количество
+            position_side: 'LONG' или 'SHORT' для хеджирования, None для ONE-WAY
 
         Returns:
             True если успешно
@@ -448,12 +646,17 @@ class BinanceClient:
         if not self.validate_quantity(rounded_quantity, symbol):
             return False
 
-        await self.client.futures_create_order(
-            symbol=symbol,
-            side=side,
-            type='MARKET',
-            quantity=rounded_quantity
-        )
+        order_params = {
+            'symbol': symbol,
+            'side': side,
+            'type': 'MARKET',
+            'quantity': rounded_quantity
+        }
+
+        if position_side:
+            order_params['positionSide'] = position_side
+
+        await self.client.futures_create_order(**order_params)
 
         return True
 
