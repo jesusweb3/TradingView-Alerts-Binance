@@ -167,6 +167,16 @@ class HedgeManager:
             )
 
             if result:
+                config = config_manager.get_hedging_config()
+                trigger_pnl = config['trigger_pnl']
+
+                if hedge_position_side == 'SHORT':
+                    trigger_price = signal_price * (1 - (trigger_pnl / (100 * self.leverage)))
+                    breakeven_price = signal_price * (1 - (pending.tp_pnl / (100 * self.leverage)))
+                else:
+                    trigger_price = signal_price * (1 + (trigger_pnl / (100 * self.leverage)))
+                    breakeven_price = signal_price * (1 + (pending.tp_pnl / (100 * self.leverage)))
+
                 self.active_hedge = ActiveHedge(
                     symbol=pending.symbol,
                     order_id=result['orderId'],
@@ -181,7 +191,12 @@ class HedgeManager:
                     leverage=self.leverage
                 )
                 self.pending_hedge = None
-                self.logger.info(f"Хедж размещен: {hedge_side} {quantity} по {signal_price:.2f}, первый SL {stop_price:.2f}")
+                self.logger.info(
+                    f"Хедж размещен: {hedge_side} {quantity} по {signal_price:.2f}, "
+                    f"первый SL {stop_price:.2f}. "
+                    f"Перенос SL при хедж PnL +{trigger_pnl}% (цена {trigger_price:.2f}) "
+                    f"на уровень {breakeven_price:.2f} (БУ +{pending.tp_pnl}%)"
+                )
 
         except Exception as e:
             self.logger.error(f"Ошибка размещения хеджа: {e}")
@@ -261,9 +276,12 @@ class HedgeManager:
         except Exception as e:
             self.logger.error(f"Ошибка переноса SL в БУ: {e}")
 
-    async def check_hedge_closed(self) -> bool:
+    async def check_hedge_closed(self, current_price: float) -> bool:
         """
-        Проверяет закрылся ли хедж и определяет тип закрытия
+        Проверяет закрылся ли хедж по цене стоп лосса
+
+        Args:
+            current_price: Текущая цена
 
         Returns:
             True если хедж был закрыт
@@ -272,17 +290,19 @@ class HedgeManager:
             return False
 
         hedge = self.active_hedge
-        position = await self.exchange_client.get_current_position(hedge.symbol)
 
-        if position:
-            position_side_value = 'LONG' if position['side'] == 'Buy' else 'SHORT'
-            if position_side_value == hedge.hedge_position_side:
-                return False
+        if hedge.hedge_position_side == 'SHORT':
+            hedge_closed = current_price >= hedge.hedge_sl_price
+        else:
+            hedge_closed = current_price <= hedge.hedge_sl_price
 
-        self.logger.info("Хедж позиция закрыта")
-        await self._process_hedge_closure(hedge)
-        self.active_hedge = None
-        return True
+        if hedge_closed:
+            self.logger.info(f"Хедж позиция закрыта (цена {current_price:.2f} достигла SL {hedge.hedge_sl_price:.2f})")
+            await self._process_hedge_closure(hedge)
+            self.active_hedge = None
+            return True
+
+        return False
 
     async def _process_hedge_closure(self, hedge: ActiveHedge):
         """
@@ -302,7 +322,8 @@ class HedgeManager:
 
             if self.failed_hedges_count >= max_failures:
                 self.hedging_enabled = False
-                self.logger.error(f"Хеджирование отключено: {self.failed_hedges_count} неудач (максимум: {max_failures})")
+                self.logger.error(
+                    f"Хеджирование отключено: {self.failed_hedges_count} неудач (максимум: {max_failures})")
 
     def check_main_pnl_crossed_activation(self, current_price: float) -> bool:
         """

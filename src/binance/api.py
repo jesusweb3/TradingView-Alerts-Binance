@@ -707,7 +707,7 @@ class BinanceClient:
 
     @retry_on_api_error()
     async def close_position(self, symbol: str) -> bool:
-        """Закрывает текущую позицию по символу с поддержкой HEDGE MODE"""
+        """Закрывает текущую позицию по символу (HEDGE MODE - без reduceOnly)"""
         position = await self.get_current_position(symbol)
         if not position:
             return True
@@ -721,8 +721,7 @@ class BinanceClient:
             side=opposite_side,
             type='MARKET',
             quantity=rounded_size,
-            positionSide=position_side,
-            reduceOnly=True
+            positionSide=position_side
         )
 
         self.logger.info(f"Закрыта {position['side']} позиция {symbol}, PnL: {position['unrealized_pnl']}")

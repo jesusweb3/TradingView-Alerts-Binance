@@ -101,7 +101,7 @@ class HedgingStrategy:
 
         if self.hedge_manager.active_hedge:
             await self.hedge_manager.check_hedge_pnl(current_price)
-            hedge_closed = await self.hedge_manager.check_hedge_closed()
+            hedge_closed = await self.hedge_manager.check_hedge_closed(current_price)
 
             if hedge_closed:
                 await self._process_hedge_closed()
@@ -373,8 +373,7 @@ class HedgingStrategy:
                 side=opposite_side,
                 type='MARKET',
                 quantity=rounded_size,
-                positionSide=position_side_to_close,
-                reduceOnly=True
+                positionSide=position_side_to_close
             )
 
             logger.info(f"Закрыта {current_position['side']} позиция")
