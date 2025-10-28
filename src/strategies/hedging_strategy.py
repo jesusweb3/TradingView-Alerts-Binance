@@ -104,16 +104,14 @@ class HedgingStrategy:
             hedge_closed = await self.hedge_manager.check_hedge_closed(current_price)
 
             if hedge_closed:
-                await self._process_hedge_closed()
+                await self._on_hedge_closed()
 
-        elif self.hedge_manager.pending_hedge:
-            if self.hedge_manager.check_main_pnl_crossed_activation(current_price):
-                self.hedge_manager.hedge_can_be_triggered_again = True
-
-    async def _process_hedge_closed(self):
-        """Обрабатывает закрытие хеджа"""
-        if not self.hedge_manager.hedging_enabled:
-            logger.warning("Хеджирование отключено после неудач")
+    async def _on_hedge_closed(self):
+        """Обработчик закрытия хеджа"""
+        if self.hedge_manager.hedging_enabled:
+            logger.info("Хедж успешно закрыт. Ожидаем повторной активации")
+        else:
+            logger.error("Хеджирование отключено - новые хеджи не будут открываться")
 
     async def get_current_price(self) -> Optional[float]:
         """
@@ -242,7 +240,7 @@ class HedgingStrategy:
         1. Проверяем текущую позицию
         2. Если нет позиции - открываем новую
         3. Если есть позиция в том же направлении - игнорируем
-        4. Если есть позиция в противоположном направлении - сценарий смены сигнала
+        4. Если есть позиция в противоположном направлении - закрываем и открываем новую
         """
         try:
             normalized_symbol = self.exchange.normalize_symbol(self.symbol)

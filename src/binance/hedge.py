@@ -36,6 +36,7 @@ class ActiveHedge:
     sl_pnl: float
     tp_pnl: float
     leverage: int
+    activation_price: float
     breakeven_sl_active: bool = field(default=False)
 
 
@@ -53,7 +54,9 @@ class HedgeManager:
         self.monitoring_active = False
         self.failed_hedges_count = 0
         self.hedging_enabled = True
-        self.hedge_can_be_triggered_again = False
+
+        self.hedge_exited_profitable = False
+        self.hysteresis_crossed_activation_upside = False
 
         self._placement_lock = asyncio.Lock()
         self._is_placing_hedge = False
@@ -85,13 +88,15 @@ class HedgeManager:
             sl_price = main_twx * (1 - (sl_pnl / (100 * self.leverage)))
 
         self.monitoring_active = True
-        self.hedge_can_be_triggered_again = False
+        self.hedge_exited_profitable = False
+        self.hysteresis_crossed_activation_upside = False
 
         self.logger.info(
             f"Мониторинг хеджирования: основная {position_side} по {main_twx:.2f}. "
             f"Активация хеджа при основной PnL {activation_pnl}% (цена {activation_price:.2f}). "
             f"Первый SL хеджа при основной PnL {sl_pnl}% (цена {sl_price:.2f}). "
-            f"Перенос SL в БУ при хедж PnL +{tp_pnl}%"
+            f"Перенос SL в БУ при хедж PnL +{tp_pnl}%. "
+            f"failed_hedges_count={self.failed_hedges_count}, hedging_enabled={self.hedging_enabled}"
         )
 
         self.pending_hedge = PendingHedge(
@@ -112,7 +117,10 @@ class HedgeManager:
         Args:
             current_price: Текущая цена актива
         """
-        if not self.monitoring_active or self.active_hedge or not self.pending_hedge:
+        if not self.monitoring_active or self.active_hedge:
+            return
+
+        if not self.pending_hedge:
             return
 
         if self._is_placing_hedge:
@@ -123,19 +131,34 @@ class HedgeManager:
         position_side = pending.main_position_side
 
         should_activate = False
-        if position_side == 'Buy' and current_price <= activation_target:
-            should_activate = True
-        elif position_side == 'Sell' and current_price >= activation_target:
-            should_activate = True
 
-        if should_activate:
+        if position_side == 'Buy':
+            if current_price <= activation_target:
+                should_activate = True
+            if current_price > activation_target:
+                self.hysteresis_crossed_activation_upside = True
+        else:
+            if current_price >= activation_target:
+                should_activate = True
+            if current_price < activation_target:
+                self.hysteresis_crossed_activation_upside = True
+
+        if not self.hedge_exited_profitable and should_activate:
             async with self._placement_lock:
                 if self._is_placing_hedge or self.active_hedge:
                     return
-
                 self._is_placing_hedge = True
 
             self.logger.info(f"Активируем хедж: цена {current_price:.2f} достигла {activation_target:.2f}")
+            await self._place_hedge(pending, current_price)
+        elif self.hedge_exited_profitable and self.hysteresis_crossed_activation_upside and should_activate:
+            async with self._placement_lock:
+                if self._is_placing_hedge or self.active_hedge:
+                    return
+                self._is_placing_hedge = True
+
+            self.logger.info(
+                f"Активируем хедж после гистерезиса: цена {current_price:.2f} достигла {activation_target:.2f}")
             await self._place_hedge(pending, current_price)
 
     async def _place_hedge(self, pending: PendingHedge, signal_price: float):
@@ -188,9 +211,13 @@ class HedgeManager:
                     activation_pnl=pending.activation_pnl,
                     sl_pnl=pending.sl_pnl,
                     tp_pnl=pending.tp_pnl,
-                    leverage=self.leverage
+                    leverage=self.leverage,
+                    activation_price=pending.activation_pnl_target
                 )
                 self.pending_hedge = None
+                self.hedge_exited_profitable = False
+                self.hysteresis_crossed_activation_upside = False
+
                 self.logger.info(
                     f"Хедж размещен: {hedge_side} {quantity} по {signal_price:.2f}, "
                     f"первый SL {stop_price:.2f}. "
@@ -224,8 +251,10 @@ class HedgeManager:
         )
 
         if hedge_pnl_percent >= trigger_pnl and not hedge.breakeven_sl_active:
-            self.logger.info(f"Хедж достиг +{hedge_pnl_percent:.2f}%, переносим SL в БУ")
+            self.logger.info(f"Хедж достиг +{hedge_pnl_percent:.2f}%, триггер {trigger_pnl}% -> переносим SL в БУ")
             await self._move_sl_to_breakeven(hedge)
+        elif hedge_pnl_percent < trigger_pnl and not hedge.breakeven_sl_active:
+            self.logger.debug(f"Хедж PnL: +{hedge_pnl_percent:.2f}%, ожидаем триггер {trigger_pnl}%")
 
     @staticmethod
     def _calculate_pnl(entry_price: float, current_price: float, position_side: str) -> float:
@@ -271,7 +300,11 @@ class HedgeManager:
             if success:
                 hedge.hedge_sl_price = breakeven_price
                 hedge.breakeven_sl_active = True
-                self.logger.info(f"SL хеджа перенесен в БУ на {breakeven_price:.2f}")
+                self.hedge_exited_profitable = True
+                self.hysteresis_crossed_activation_upside = False
+                self.logger.info(f"✅ SL хеджа успешно перенесен в БУ на {breakeven_price:.2f}")
+            else:
+                self.logger.error(f"❌ Не удалось перенести SL на {breakeven_price:.2f}")
 
         except Exception as e:
             self.logger.error(f"Ошибка переноса SL в БУ: {e}")
@@ -316,16 +349,45 @@ class HedgeManager:
 
         if hedge.breakeven_sl_active:
             self.logger.info(f"Хедж закрыт по второму SL (БУ/профит)")
+            self.hedge_exited_profitable = True
+            self.hysteresis_crossed_activation_upside = False
+            self.pending_hedge = None
         else:
             self.failed_hedges_count += 1
-            self.logger.warning(f"Хедж закрыт по первому SL (убыток). Неудач: {self.failed_hedges_count}")
+            self.logger.warning(
+                f"Хедж закрыт по первому SL (убыток). Неудач: {self.failed_hedges_count}/{max_failures}")
 
             if self.failed_hedges_count >= max_failures:
                 self.hedging_enabled = False
+                self.pending_hedge = None
                 self.logger.error(
                     f"Хеджирование отключено: {self.failed_hedges_count} неудач (максимум: {max_failures})")
+            else:
+                self.logger.info(
+                    f"Хеджирование активно. Осталось попыток: {max_failures - self.failed_hedges_count}")
+                self.hedge_exited_profitable = False
+                self.hysteresis_crossed_activation_upside = False
 
-    def check_main_pnl_crossed_activation(self, current_price: float) -> bool:
+                self._recreate_pending_hedge_for_retry(hedge)
+
+    def _recreate_pending_hedge_for_retry(self, hedge: ActiveHedge):
+        """
+        Пересоздаёт pending_hedge после убыточного закрытия хеджа для повторной активации
+
+        Args:
+            hedge: Закрытый хедж с параметрами для восстановления
+        """
+        self.pending_hedge = PendingHedge(
+            symbol=hedge.symbol,
+            main_twx=hedge.main_twx,
+            main_position_side=hedge.main_position_side,
+            activation_pnl_target=hedge.activation_price,
+            sl_pnl_target=hedge.hedge_sl_price,
+            activation_pnl=hedge.activation_pnl,
+            sl_pnl=hedge.sl_pnl,
+            tp_pnl=hedge.tp_pnl
+        )
+        self.logger.info(f"Pending hedge восстановлен для повторной попытки открытия")
         """
         Проверяет пересекла ли основная позиция границу активации (для гистерезиса)
 
@@ -358,7 +420,8 @@ class HedgeManager:
         self.pending_hedge = None
         self.active_hedge = None
         self.monitoring_active = False
-        self.hedge_can_be_triggered_again = False
+        self.hedge_exited_profitable = False
+        self.hysteresis_crossed_activation_upside = False
         self.hedging_enabled = True
 
     def get_status(self) -> Dict[str, Any]:
@@ -367,7 +430,6 @@ class HedgeManager:
             'hedging_enabled': self.hedging_enabled,
             'failed_hedges_count': self.failed_hedges_count,
             'monitoring_active': self.monitoring_active,
-            'hedge_can_be_triggered_again': self.hedge_can_be_triggered_again,
             'has_active_hedge': self.active_hedge is not None,
             'has_pending_hedge': self.pending_hedge is not None
         }
