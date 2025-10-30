@@ -12,7 +12,6 @@ from src.config.manager import config_manager
 from src.strategies.factory import create_strategy
 from src.strategies.classic_strategy import ClassicStrategy
 from src.strategies.stop_strategy import StopStrategy
-from src.strategies.hedging_strategy import HedgingStrategy
 from src.monitoring.health_monitor import health_monitor
 from src.telegram.notifier import TelegramNotifier
 from src.telegram.handler import initialize_telegram
@@ -24,7 +23,7 @@ class AppState:
     """Состояние приложения"""
     def __init__(self):
         self.allowed_ips: Set[str] = set()
-        self.strategy: Optional[Union[ClassicStrategy, StopStrategy, HedgingStrategy]] = None
+        self.strategy: Optional[Union[ClassicStrategy, StopStrategy]] = None
         self.telegram_notifier: Optional[TelegramNotifier] = None
 
 
@@ -45,7 +44,7 @@ def get_app_state(request: Request) -> AppState:
     return request.app.state.app_state
 
 
-def get_strategy(app_state: AppState = Depends(get_app_state)) -> Union[ClassicStrategy, StopStrategy, HedgingStrategy]:
+def get_strategy(app_state: AppState = Depends(get_app_state)) -> Union[ClassicStrategy, StopStrategy]:
     """Dependency для получения strategy"""
     if app_state.strategy is None:
         raise HTTPException(status_code=500, detail="Сервер не готов")
@@ -86,14 +85,6 @@ async def initialize_app():
             stop_config = config_manager.get_trailing_stop_config()
             logger.info(f"Актив: {symbol} со стопами: активация {stop_config['activation_percent']}%, "
                         f"стоп {stop_config['stop_percent']}%")
-        elif trading_strategy == "hedging":
-            hedging_config = config_manager.get_hedging_config()
-            logger.info(f"Актив: {symbol} с хеджированием: "
-                        f"активация {hedging_config['activation_pnl']}%, "
-                        f"первый SL {hedging_config['sl_pnl']}%, "
-                        f"триггер переноса {hedging_config['trigger_pnl']}%, "
-                        f"BU уровень {hedging_config['tp_pnl']}%, "
-                        f"макс неудач {hedging_config['max_failures']}")
         else:
             logger.info(f"Актив: {symbol} в классическом режиме (без стопов)")
 
@@ -176,7 +167,7 @@ async def health_check():
 @app.post("/webhook")
 async def webhook_handler(
     request: Request,
-    strategy: Union[ClassicStrategy, StopStrategy, HedgingStrategy] = Depends(get_strategy),
+    strategy: Union[ClassicStrategy, StopStrategy] = Depends(get_strategy),
     allowed_ips: Set[str] = Depends(get_allowed_ips)
 ):
     """Webhook endpoint для приема сигналов от TradingView"""

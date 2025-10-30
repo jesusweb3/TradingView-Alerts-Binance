@@ -132,6 +132,40 @@ class BinanceClient:
             return False
 
     @retry_on_api_error()
+    async def disable_hedge_mode(self) -> bool:
+        """
+        Отключает режим хеджирования если он включен (переходит в ONE-WAY)
+
+        Returns:
+            True если режим отключен или уже был отключен
+        """
+        try:
+            current_mode = await self.client.futures_get_position_mode()
+            is_hedge_enabled = current_mode.get('dualSidePosition', False)
+
+            if not is_hedge_enabled:
+                self.logger.info("Режим хеджирования уже отключен (ONE-WAY)")
+                return True
+
+            await self.client.futures_change_position_mode(dualSidePosition='false')
+            self.logger.info("Режим хеджирования отключен, включен ONE-WAY режим")
+            return True
+
+        except BinanceAPIException as e:
+            if "No need to change position side" in str(e):
+                self.logger.info("Режим хеджирования уже отключен")
+                return True
+            elif "Modify Hedge mode is not allowed" in str(e):
+                self.logger.error("Нельзя сменить режим — есть открытые позиции или ордера")
+                return False
+            else:
+                self.logger.error(f"Binance API ошибка: {e}")
+                return False
+        except Exception as e:
+            self.logger.error(f"Ошибка отключения режима хеджирования: {e}")
+            return False
+
+    @retry_on_api_error()
     async def open_position_with_sl(self, symbol: str, side: str, quantity: float,
                                     stop_price: float, position_side: str = 'LONG') -> Optional[Dict[str, Any]]:
         """
