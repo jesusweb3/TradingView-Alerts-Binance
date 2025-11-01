@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 
 
 class BinancePriceStream:
-    """WebSocket поток цен для Binance Futures с автоматическим переподключением"""
+    """WebSocket поток цен для Binance Futures с автоматическим переподключением и barrier support"""
 
     def __init__(self, symbol: str, on_price_update: Callable[[float], None]):
         self.symbol = symbol.lower()
@@ -57,30 +57,50 @@ class BinancePriceStream:
         logger.info(f"Поток цен для {self.symbol} остановлен")
 
     def watch_price(self, target_price: float, direction: str,
-                    on_reach: Callable[[float], Coroutine[Any, Any, None]]):
+                    on_reach: Callable[[float], Coroutine[Any, Any, None]],
+                    barrier_price: Optional[float] = None,
+                    barrier_side: Optional[str] = None):
         """
-        Следит за целевой ценой и вызывает async колбек когда цена её достигает
+        Следит за целевой ценой с опциональным барьером для hedging
 
         Args:
             target_price: Целевая цена для отслеживания
             direction: 'long' (цена >= target) или 'short' (цена <= target)
             on_reach: Async колбек вызываемый при достижении цены
+            barrier_price: Опциональный уровень, который цена должна пересечь перед целевой
+            barrier_side: 'above' (цена должна быть выше барьера) или 'below' (цена должна быть ниже барьера)
         """
-        watch_key = f"{target_price}_{direction}"
+        watch_key = f"{target_price}_{direction}_{barrier_price}_{barrier_side}"
         self.watched_prices[watch_key] = {
             'target_price': target_price,
             'direction': direction,
             'on_reach': on_reach,
-            'triggered': False
+            'triggered': False,
+            'barrier_price': barrier_price,
+            'barrier_side': barrier_side,
+            'barrier_crossed': False
         }
-        logger.info(f"Добавлено отслеживание цены {target_price} ({direction}) для {self.symbol.upper()}")
+        logger.info(
+            f"Добавлено отслеживание цены {target_price} ({direction}) "
+            f"для {self.symbol.upper()}"
+            + (f" с барьером {barrier_price} ({barrier_side})" if barrier_price else "")
+        )
 
-    def cancel_watch(self, target_price: float, direction: str):
+    def cancel_watch(self, target_price: float, direction: str,
+                     barrier_price: Optional[float] = None,
+                     barrier_side: Optional[str] = None):
         """Отменяет слежку за целевой ценой"""
-        watch_key = f"{target_price}_{direction}"
+        watch_key = f"{target_price}_{direction}_{barrier_price}_{barrier_side}"
         if watch_key in self.watched_prices:
             del self.watched_prices[watch_key]
             logger.info(f"Отменено отслеживание цены {target_price} ({direction}) для {self.symbol.upper()}")
+
+    def cancel_all_watches(self):
+        """Отменяет ВСЕ отслеживания цен"""
+        count = len(self.watched_prices)
+        self.watched_prices.clear()
+        if count > 0:
+            logger.info(f"Отменены все {count} отслеживаний цен для {self.symbol.upper()}")
 
     async def _connection_loop(self):
         """
@@ -207,12 +227,28 @@ class BinancePriceStream:
             target_price = watch_data['target_price']
             direction = watch_data['direction']
             on_reach = watch_data['on_reach']
+            barrier_price = watch_data['barrier_price']
+            barrier_side = watch_data['barrier_side']
 
             should_trigger = False
-            if direction == 'long' and current_price >= target_price:
-                should_trigger = True
-            elif direction == 'short' and current_price <= target_price:
-                should_trigger = True
+
+            if barrier_price is not None and barrier_side is not None:
+                if not watch_data['barrier_crossed']:
+                    if barrier_side == 'above' and current_price > barrier_price:
+                        watch_data['barrier_crossed'] = True
+                    elif barrier_side == 'below' and current_price < barrier_price:
+                        watch_data['barrier_crossed'] = True
+
+                if watch_data['barrier_crossed']:
+                    if direction == 'long' and current_price >= target_price:
+                        should_trigger = True
+                    elif direction == 'short' and current_price <= target_price:
+                        should_trigger = True
+            else:
+                if direction == 'long' and current_price >= target_price:
+                    should_trigger = True
+                elif direction == 'short' and current_price <= target_price:
+                    should_trigger = True
 
             if should_trigger:
                 watch_data['triggered'] = True

@@ -224,11 +224,9 @@ class StopStrategy:
         if action == "buy":
             success = await self.exchange.open_long_position(self.symbol, quantity)
             direction = "Long"
-            position_side = "Buy"
         else:
             success = await self.exchange.open_short_position(self.symbol, quantity)
             direction = "Short"
-            position_side = "Sell"
 
         if not success:
             logger.error(f"Не удалось открыть {direction} позицию {self.symbol}")
@@ -238,7 +236,7 @@ class StopStrategy:
 
         entry_price = await self.exchange.get_exact_entry_price(self.symbol)
         if entry_price:
-            await self._start_stop_monitoring(position_side, entry_price)
+            await self._start_stop_monitoring(action, entry_price)
 
         return True
 
@@ -253,8 +251,6 @@ class StopStrategy:
                 return False
             logger.warning(f"Используем последнюю известную цену ${current_price:.2f} для разворота")
 
-        await self.exchange.cancel_all_stops(self.symbol, "Buy" if self.last_action == "sell" else "Sell")
-
         new_quantity = self.exchange.calculate_quantity(self.symbol, position_size, current_price)
 
         if self.last_quantity is None:
@@ -263,23 +259,17 @@ class StopStrategy:
         else:
             total_quantity = self.last_quantity + new_quantity
 
-        logger.info(
-            f"Разворот: предыдущий объем {self.last_quantity}, новый объем {new_quantity}, итого {total_quantity}")
+        logger.info(f"Разворот: предыдущий объем {self.last_quantity}, новый объем {new_quantity}, итого {total_quantity}")
 
         success = await self.exchange.reverse_position_fast(self.symbol, total_quantity)
 
         if success:
             self.last_quantity = new_quantity
-
-            current_position = await self.exchange.get_current_position(self.symbol)
-            if current_position:
-                entry_price = current_position['entry_price']
-                new_position_side = "Buy" if current_position['side'] == "Buy" else "Sell"
-                await self._start_stop_monitoring(new_position_side, entry_price)
+            logger.info(f"Сохранен новый last_quantity: {self.last_quantity}")
 
         return success
 
-    async def _start_stop_monitoring(self, position_side: str, entry_price: float):
+    async def _start_stop_monitoring(self, action: Action, entry_price: float):
         """Запускает мониторинг стопа для текущей позиции"""
         try:
             stop_config = config_manager.get_trailing_stop_config()
@@ -296,18 +286,18 @@ class StopStrategy:
                 return
 
             activation_price, stop_limit_price = self._calculate_stop_levels(
-                entry_price, position_side, activation_percent, stop_percent
+                entry_price, action, activation_percent, stop_percent
             )
 
-            direction = 'long' if position_side == 'Buy' else 'short'
+            direction = 'long' if action == "buy" else 'short'
 
             logger.info(
                 f"Запуск мониторинга: Цена входа ${entry_price:.2f}, "
-                f"Активация на ${activation_price:.2f} ({activation_percent}% PnL), "
-                f"Стоп на ${stop_limit_price:.2f} ({stop_percent}% PnL)"
+                f"Активация на ${activation_price:.2f} ({activation_percent}%), "
+                f"Стоп на ${stop_limit_price:.2f} ({stop_percent}%)"
             )
 
-            callback = self._create_stop_callback(position_side, stop_limit_price)
+            callback = self._create_stop_callback()
             self.price_stream.watch_price(
                 target_price=activation_price,
                 direction=direction,
@@ -317,71 +307,77 @@ class StopStrategy:
         except Exception as e:
             logger.error(f"Ошибка запуска мониторинга стопа: {e}")
 
-    def _calculate_stop_levels(self, entry_price: float, position_side: str,
+    def _calculate_stop_levels(self, entry_price: float, action: Action,
                                activation_percent: float, stop_percent: float) -> tuple:
         """
-        Рассчитывает уровни цены для активации и стопа на основе PnL процентов
+        Рассчитывает уровни цены для активации и стопа на основе PnL процентов с округлением
 
         Args:
             entry_price: Цена входа
-            position_side: 'Buy' или 'Sell'
-            activation_percent: PnL процент для активации стопа
-            stop_percent: PnL процент для уровня стопа
+            action: 'buy' или 'sell'
+            activation_percent: Процент активации
+            stop_percent: Процент стопа
 
         Returns:
-            (activation_price, stop_limit_price)
+            (activation_price, stop_limit_price) - обе округлены по правилам биржи
         """
         leverage = self.exchange.leverage
 
         activation_movement = activation_percent / (100 * leverage)
         stop_movement = stop_percent / (100 * leverage)
 
-        if position_side == 'Buy':
+        if action == 'buy':
             activation_price = entry_price * (1 + activation_movement)
             stop_limit_price = entry_price * (1 + stop_movement)
         else:
             activation_price = entry_price * (1 - activation_movement)
             stop_limit_price = entry_price * (1 - stop_movement)
 
+        activation_price = self.exchange.round_price(self.symbol, activation_price)
+        stop_limit_price = self.exchange.round_price(self.symbol, stop_limit_price)
+
         return activation_price, stop_limit_price
 
-    def _create_stop_callback(self, position_side: str, stop_limit_price: float):
+    def _create_stop_callback(self):
         """Создаёт async callback для активации стопа"""
-
         async def callback(current_price: float) -> None:
-            logger.debug(f"Активирован callback на цене ${current_price:.2f}")
-            await self._on_activation_price_reached(position_side, stop_limit_price)
-
+            await self._on_activation_price_reached(current_price)
         return callback
 
-    async def _on_activation_price_reached(self, position_side: str, stop_limit_price: float) -> None:
+    async def _on_activation_price_reached(self, current_price: float) -> None:
         """Колбек вызываемый когда цена достигает уровня активации"""
         try:
             logger.info(f"Цена активации достигнута, выставляем стоп-лимит ордер")
 
-            side = 'SELL' if position_side == 'Buy' else 'BUY'
             current_position = await self.exchange.get_current_position(self.symbol)
 
             if not current_position:
                 logger.warning("Позиция не найдена при активации стопа")
                 return
 
+            side = current_position['side']
             quantity = current_position['size']
 
-            stop_price = stop_limit_price + 1 if position_side == 'Buy' else stop_limit_price - 1
+            if side == 'Buy':
+                order_side = 'SELL'
+            else:
+                order_side = 'BUY'
+
+            stop_price = current_price
+            limit_price = current_price * 0.999 if side == 'Buy' else current_price * 1.001
 
             result = await self.exchange.place_stop_limit_order(
                 symbol=self.symbol,
-                side=side,
+                side=order_side,
                 quantity=quantity,
                 stop_price=stop_price,
-                limit_price=stop_limit_price
+                limit_price=limit_price
             )
 
             if result:
                 self.active_stop_order_id = result.get('orderId')
                 logger.info(f"Стоп-лимит ордер выставлен: ID={self.active_stop_order_id}, "
-                            f"stop={stop_price}, limit={stop_limit_price}")
+                            f"stop={stop_price}, limit={limit_price}")
             else:
                 logger.error("Не удалось выставить стоп-лимит ордер")
 
@@ -412,8 +408,7 @@ class StopStrategy:
             'symbol': self.symbol,
             'last_action': self.last_action,
             'last_quantity': self.last_quantity,
-            'current_price': self.current_price,
-            'active_stop_order_id': self.active_stop_order_id
+            'current_price': self.current_price
         }
 
         if self.price_stream:

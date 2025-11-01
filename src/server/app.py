@@ -12,6 +12,7 @@ from src.config.manager import config_manager
 from src.strategies.strategy_selection import create_strategy
 from src.strategies.classic_strategy.strategy import ClassicStrategy
 from src.strategies.stop_strategy.strategy import StopStrategy
+from src.strategies.hedging_strategy.strategy import HedgingStrategy
 from src.monitoring.health_monitor import health_monitor
 from src.telegram.notifier import TelegramNotifier
 from src.telegram.handler import initialize_telegram
@@ -23,7 +24,7 @@ class AppState:
     """Состояние приложения"""
     def __init__(self):
         self.allowed_ips: Set[str] = set()
-        self.strategy: Optional[Union[ClassicStrategy, StopStrategy]] = None
+        self.strategy: Optional[Union[ClassicStrategy, StopStrategy, HedgingStrategy]] = None
         self.telegram_notifier: Optional[TelegramNotifier] = None
 
 
@@ -44,7 +45,7 @@ def get_app_state(request: Request) -> AppState:
     return request.app.state.app_state
 
 
-def get_strategy(app_state: AppState = Depends(get_app_state)) -> Union[ClassicStrategy, StopStrategy]:
+def get_strategy(app_state: AppState = Depends(get_app_state)) -> Union[ClassicStrategy, StopStrategy, HedgingStrategy]:
     """Dependency для получения strategy"""
     if app_state.strategy is None:
         raise HTTPException(status_code=500, detail="Сервер не готов")
@@ -155,7 +156,7 @@ async def health_check():
 @app.post("/webhook")
 async def webhook_handler(
     request: Request,
-    strategy: Union[ClassicStrategy, StopStrategy] = Depends(get_strategy),
+    strategy: Union[ClassicStrategy, StopStrategy, HedgingStrategy] = Depends(get_strategy),
     allowed_ips: Set[str] = Depends(get_allowed_ips)
 ):
     """Webhook endpoint для приема сигналов от TradingView"""

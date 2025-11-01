@@ -101,13 +101,18 @@ class StopBinanceClient:
             info = {
                 'qty_precision': symbol_info.get('quantityPrecision', 3),
                 'qty_step': None,
-                'min_qty': None
+                'min_qty': None,
+                'price_precision': None,
+                'tick_size': None
             }
 
             for filter_item in symbol_info['filters']:
                 if filter_item['filterType'] == 'LOT_SIZE':
                     info['qty_step'] = float(filter_item['stepSize'])
                     info['min_qty'] = float(filter_item['minQty'])
+                elif filter_item['filterType'] == 'PRICE_FILTER':
+                    info['tick_size'] = float(filter_item['tickSize'])
+                    info['price_precision'] = filter_item
 
             self._instruments_info[symbol] = info
 
@@ -291,7 +296,7 @@ class StopBinanceClient:
     async def place_stop_limit_order(self, symbol: str, side: str, quantity: float,
                                      stop_price: float, limit_price: float) -> Optional[Dict[str, Any]]:
         """
-        Размещает стоп-лимит ордер с reduceOnly
+        Размещает стоп-лимит ордер с reduceOnly (цены округляются по правилам биржи)
 
         Args:
             symbol: Торговый символ
@@ -304,18 +309,23 @@ class StopBinanceClient:
             Результат размещения ордера или None при ошибке
         """
         try:
+            stop_price_rounded = self.round_price(symbol, stop_price)
+            limit_price_rounded = self.round_price(symbol, limit_price)
+
             result = await self.client.futures_create_order(
                 symbol=symbol,
                 side=side,
                 type='STOP',
                 quantity=quantity,
-                price=limit_price,
-                stopPrice=stop_price,
+                price=limit_price_rounded,
+                stopPrice=stop_price_rounded,
                 timeInForce='GTC',
                 reduceOnly=True
             )
 
-            self.logger.info(f"Стоп-лимит ордер размещен: {symbol}, stop={stop_price}, limit={limit_price}")
+            self.logger.info(
+                f"Стоп-лимит ордер размещен: {symbol}, stop={stop_price_rounded}, limit={limit_price_rounded}"
+            )
             return result
 
         except Exception as e:
@@ -391,6 +401,27 @@ class StopBinanceClient:
         except Exception as e:
             self.logger.error(f"Ошибка отмены стопов для {symbol}: {e}")
             return False
+
+    def round_price(self, symbol: str, price: float) -> float:
+        """
+        Округляет цену по правилам биржи (по tickSize)
+
+        Args:
+            symbol: Торговый символ
+            price: Цена для округления
+
+        Returns:
+            Округленная цена
+        """
+        info = self._instruments_info.get(symbol)
+        if not info or not info.get('tick_size'):
+            self.logger.warning(f"Информация о precision для {symbol} не загружена, возвращаем исходную цену")
+            return price
+
+        tick_size = info['tick_size']
+        rounded_price = round(price / tick_size) * tick_size
+
+        return round(rounded_price, 8)
 
     def calculate_quantity(self, symbol: str, position_size: float, current_price: float) -> float:
         """
