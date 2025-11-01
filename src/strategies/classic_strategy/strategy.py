@@ -44,11 +44,6 @@ class ClassicStrategy:
 
         await self.exchange.initialize()
 
-        hedge_mode_disabled = await self.exchange.disable_hedge_mode()
-        if not hedge_mode_disabled:
-            logger.error("Не удалось отключить режим хеджирования")
-            raise RuntimeError("Не удалось установить ONE-WAY режим")
-
         self.price_stream = BinancePriceStream(self.symbol, self._on_price_update)
         self.price_stream.start()
 

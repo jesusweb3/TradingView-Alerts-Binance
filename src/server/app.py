@@ -76,18 +76,6 @@ async def initialize_app():
         else:
             raise RuntimeError("Не удалось подключиться к Telegram боту")
 
-        trading_config = config_manager.get_trading_config()
-        symbol = trading_config['symbol']
-
-        trading_strategy = config_manager.get_trading_strategy()
-
-        if trading_strategy == "stop":
-            stop_config = config_manager.get_trailing_stop_config()
-            logger.info(f"Актив: {symbol} со стопами: активация {stop_config['activation_percent']}%, "
-                        f"стоп {stop_config['stop_percent']}%")
-        else:
-            logger.info(f"Актив: {symbol} в классическом режиме (без стопов)")
-
         app_state.strategy = create_strategy()
         await app_state.strategy.initialize()
 
