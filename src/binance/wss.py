@@ -2,7 +2,7 @@
 
 import json
 import asyncio
-from typing import Callable, Optional
+from typing import Callable, Optional, Dict, Coroutine, Any
 from datetime import datetime, timezone
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
@@ -30,6 +30,8 @@ class BinancePriceStream:
         self.disconnection_start: Optional[datetime] = None
         self.long_disconnection_notified = False
 
+        self.watched_prices: Dict[str, dict] = {}
+
     def start(self):
         """Запуск потока цен"""
         if self.is_running:
@@ -53,6 +55,32 @@ class BinancePriceStream:
             self.task.cancel()
 
         logger.info(f"Поток цен для {self.symbol} остановлен")
+
+    def watch_price(self, target_price: float, direction: str,
+                    on_reach: Callable[[float], Coroutine[Any, Any, None]]):
+        """
+        Следит за целевой ценой и вызывает async колбек когда цена её достигает
+
+        Args:
+            target_price: Целевая цена для отслеживания
+            direction: 'long' (цена >= target) или 'short' (цена <= target)
+            on_reach: Async колбек вызываемый при достижении цены
+        """
+        watch_key = f"{target_price}_{direction}"
+        self.watched_prices[watch_key] = {
+            'target_price': target_price,
+            'direction': direction,
+            'on_reach': on_reach,
+            'triggered': False
+        }
+        logger.info(f"Добавлено отслеживание цены {target_price} ({direction}) для {self.symbol.upper()}")
+
+    def cancel_watch(self, target_price: float, direction: str):
+        """Отменяет слежку за целевой ценой"""
+        watch_key = f"{target_price}_{direction}"
+        if watch_key in self.watched_prices:
+            del self.watched_prices[watch_key]
+            logger.info(f"Отменено отслеживание цены {target_price} ({direction}) для {self.symbol.upper()}")
 
     async def _connection_loop(self):
         """
@@ -161,12 +189,41 @@ class BinancePriceStream:
 
             self.on_price_update(current_price)
 
+            await self._check_watched_prices(current_price)
+
         except json.JSONDecodeError as e:
             logger.warning(f"Ошибка парсинга JSON для {self.symbol}: {e}")
         except (KeyError, ValueError, TypeError) as e:
             logger.warning(f"Ошибка обработки данных для {self.symbol}: {e}")
         except Exception as e:
             logger.error(f"Неожиданная ошибка обработки сообщения {self.symbol}: {e}")
+
+    async def _check_watched_prices(self, current_price: float):
+        """Проверяет достигнуты ли отслеживаемые цены и вызывает колбеки"""
+        for watch_key, watch_data in list(self.watched_prices.items()):
+            if watch_data['triggered']:
+                continue
+
+            target_price = watch_data['target_price']
+            direction = watch_data['direction']
+            on_reach = watch_data['on_reach']
+
+            should_trigger = False
+            if direction == 'long' and current_price >= target_price:
+                should_trigger = True
+            elif direction == 'short' and current_price <= target_price:
+                should_trigger = True
+
+            if should_trigger:
+                watch_data['triggered'] = True
+                logger.info(f"Цена достигла целевого уровня {target_price} ({direction}) для {self.symbol.upper()}")
+
+                try:
+                    await on_reach(current_price)
+                except Exception as e:
+                    logger.error(f"Ошибка в колбеке watch_price: {e}")
+
+                del self.watched_prices[watch_key]
 
     def get_last_price(self) -> Optional[float]:
         """Возвращает последнюю известную цену"""

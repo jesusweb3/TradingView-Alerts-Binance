@@ -9,9 +9,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 from src.utils.logger import get_logger
 from src.config.manager import config_manager
-from src.strategies.factory import create_strategy
-from src.strategies.classic_strategy import ClassicStrategy
-from src.strategies.stop_strategy import StopStrategy
+from src.strategies.strategy_selection import create_strategy
+from src.strategies.classic_strategy.strategy import ClassicStrategy
+from src.strategies.stop_strategy.strategy import StopStrategy
 from src.monitoring.health_monitor import health_monitor
 from src.telegram.notifier import TelegramNotifier
 from src.telegram.handler import initialize_telegram
