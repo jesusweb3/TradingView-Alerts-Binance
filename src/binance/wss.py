@@ -80,11 +80,8 @@ class BinancePriceStream:
             'barrier_side': barrier_side,
             'barrier_crossed': False
         }
-        logger.info(
-            f"Добавлено отслеживание цены {target_price} ({direction}) "
-            f"для {self.symbol.upper()}"
-            + (f" с барьером {barrier_price} ({barrier_side})" if barrier_price else "")
-        )
+
+        logger.info(f"Добавили отслеживание цены ${target_price:.2f} для {self.symbol.upper()}")
 
     def cancel_watch(self, target_price: float, direction: str,
                      barrier_price: Optional[float] = None,
@@ -93,14 +90,14 @@ class BinancePriceStream:
         watch_key = f"{target_price}_{direction}_{barrier_price}_{barrier_side}"
         if watch_key in self.watched_prices:
             del self.watched_prices[watch_key]
-            logger.info(f"Отменено отслеживание цены {target_price} ({direction}) для {self.symbol.upper()}")
+            logger.info(f"Отменили отслеживание цены ${target_price:.2f} для {self.symbol.upper()}")
 
     def cancel_all_watches(self):
         """Отменяет ВСЕ отслеживания цен"""
         count = len(self.watched_prices)
         self.watched_prices.clear()
         if count > 0:
-            logger.info(f"Отменены все {count} отслеживаний цен для {self.symbol.upper()}")
+            logger.info(f"Отменили все {count} отслеживаний цен для {self.symbol.upper()}")
 
     async def _connection_loop(self):
         """
@@ -252,7 +249,8 @@ class BinancePriceStream:
 
             if should_trigger:
                 watch_data['triggered'] = True
-                logger.info(f"Цена достигла целевого уровня {target_price} ({direction}) для {self.symbol.upper()}")
+                logger.info(
+                    f"Цена ${current_price:.2f} достигла целевого уровня ${target_price:.2f} для {self.symbol.upper()}")
 
                 try:
                     await on_reach(current_price)

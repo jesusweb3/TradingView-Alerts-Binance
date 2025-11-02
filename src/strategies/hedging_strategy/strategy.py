@@ -45,10 +45,6 @@ class HedgingStrategy:
         self.failure_count: int = 0
         self.active_stop_order_id: Optional[str] = None
 
-        self.activation_watch_key: Optional[str] = None
-        self.sl_watch_key: Optional[str] = None
-        self.trigger_watch_key: Optional[str] = None
-
     async def initialize(self):
         """Async инициализация стратегии"""
         if self._initialized:
@@ -230,7 +226,7 @@ class HedgingStrategy:
             self.failure_count = 0
 
             logger.info(f"Хедж позиция {self.main_position_side} стала основной, "
-                       f"виртуальная ТВХ = ${self.main_entry_price:.2f}")
+                        f"виртуальная ТВХ = ${self.main_entry_price:.2f}")
 
             await self._start_hedging_cycle()
             return True
@@ -305,11 +301,13 @@ class HedgingStrategy:
                 activation_pnl
             )
 
+            # Для LONG: цена падает к activation_price (direction='short')
+            # Для SHORT: цена растёт к activation_price (direction='long')
             direction = 'short' if self.main_position_side == 'LONG' else 'long'
 
             logger.info(
-                f"Запуск цикла хеджирования: ТВХ ${self.main_entry_price:.2f}, "
-                f"активация на {activation_pnl}% = ${activation_price:.2f}"
+                f"Отслеживаем цену ${activation_price:.2f} (PNL {activation_pnl}%). "
+                f"Если основная позиция достигнет этого уровня, откроем хедж ({self.hedge_position_side})"
             )
 
             callback = self._create_activation_callback()
@@ -318,8 +316,6 @@ class HedgingStrategy:
                 direction=direction,
                 on_reach=callback
             )
-
-            self.activation_watch_key = f"{activation_price}_{direction}"
 
         except Exception as e:
             logger.error(f"Ошибка запуска цикла хеджирования: {e}")
@@ -333,7 +329,7 @@ class HedgingStrategy:
             logger.error(f"Ошибка при открытии хеджа: {e}")
 
     async def _open_hedge_position(self, current_price: float):
-        """Открывает хедж позицию"""
+        """Открывает хедж позицию и выставляет стоп на основе реальной ТВХ"""
         try:
             if not self.hedge_position_side:
                 logger.error("hedge_position_side не установлена")
@@ -342,6 +338,7 @@ class HedgingStrategy:
             position_size = self._get_position_size()
             quantity = self.exchange.calculate_quantity(self.symbol, position_size, current_price)
 
+            # ШАГ 1: Открываем хедж
             if self.hedge_position_side == "LONG":
                 success = await self.exchange.open_long_position(self.symbol, quantity)
             else:
@@ -351,28 +348,36 @@ class HedgingStrategy:
                 logger.error(f"Не удалось открыть хедж позицию {self.hedge_position_side}")
                 return
 
+            # ШАГ 2: Получаем РЕАЛЬНЫЙ ТВХ от биржи
             entry_price = await self.exchange.get_exact_entry_price(self.symbol, self.hedge_position_side)
-            if entry_price:
-                self.hedge_entry_price = entry_price
-            else:
-                self.hedge_entry_price = current_price
 
-            logger.info(f"Хедж {self.hedge_position_side} открыта, ТВХ = ${self.hedge_entry_price:.2f}")
+            if not entry_price:
+                logger.error("Не удалось получить реальный ТВХ хеджа после открытия")
+                return
 
+            self.hedge_entry_price = entry_price
+            logger.info(f"Хедж {self.hedge_position_side} открыта, реальный ТВХ = ${self.hedge_entry_price:.2f}")
+
+            # ШАГ 3: На основе РЕАЛЬНОГО ТВХ рассчитываем и выставляем стоп
             await self._set_hedge_stop_loss()
 
         except Exception as e:
             logger.error(f"Ошибка открытия хеджа: {e}")
 
     async def _set_hedge_stop_loss(self):
-        """Выставляет стоп-лосс для хеджа и запускает отслеживание цен"""
+        """Выставляет стоп-лосс для хеджа на основе РЕАЛЬНОГО ТВХ и запускает мониторинг"""
         try:
             if not self.hedge_entry_price or not self.hedge_position_side:
                 logger.error("hedge_entry_price или hedge_position_side не установлены")
                 return
 
-            sl_pnl = self.hedging_config['sl_pnl']
+            if self.hedge_entry_price <= 0:
+                logger.error(f"Невалидный ТВХ хеджа: {self.hedge_entry_price}")
+                return
 
+            logger.info(f"Расчёт стопа на основе РЕАЛЬНОГО ТВХ: ${self.hedge_entry_price:.2f}")
+
+            sl_pnl = self.hedging_config['sl_pnl']
             sl_price = self.exchange.calculate_stop_loss_price(
                 self.hedge_entry_price,
                 self.hedge_position_side,
@@ -387,7 +392,8 @@ class HedgingStrategy:
 
             if result:
                 self.active_stop_order_id = result.get('orderId')
-                logger.info(f"Стоп-лосс хеджа выставлен: ID={self.active_stop_order_id}, цена={sl_price}")
+                logger.info(
+                    f"Стоп-лосс хеджа выставлен на основе реального ТВХ: ID={self.active_stop_order_id}, цена={sl_price}")
             else:
                 logger.error("Не удалось выставить стоп-лосс хеджа")
                 return
@@ -399,52 +405,49 @@ class HedgingStrategy:
                 trigger_pnl
             )
 
-            tp_pnl = self.hedging_config['tp_pnl']
-            tp_price = self.exchange.calculate_new_stop_price(
-                self.hedge_entry_price,
-                self.hedge_position_side,
-                tp_pnl
-            )
-
-            direction = 'long' if self.hedge_position_side == 'SHORT' else 'short'
+            # Определяем направления для двух отдельных сценариев
+            if self.hedge_position_side == 'SHORT':
+                sl_direction = 'long'
+                sl_barrier_side = 'below'
+                trigger_direction = 'short'
+                trigger_barrier_side = 'above'
+            else:  # LONG
+                sl_direction = 'short'
+                sl_barrier_side = 'above'
+                trigger_direction = 'long'
+                trigger_barrier_side = 'below'
 
             logger.info(
-                f"Запуск мониторинга хеджа: SL ${sl_price:.2f}, "
-                f"TRIGGER ${trigger_price:.2f}, TP ${tp_price:.2f}"
+                f"Мониторим хедж позицию: "
+                f"SL (убыток) = ${sl_price:.2f}, "
+                f"ТРИГГЕР (профит) = ${trigger_price:.2f}"
             )
 
+            # Watch 1: SL
             sl_callback = self._create_sl_callback()
-            sl_barrier = self.hedge_entry_price
-            sl_barrier_side = 'below' if self.hedge_position_side == 'SHORT' else 'above'
-
             self.price_stream.watch_price(
                 target_price=sl_price,
-                direction=direction,
+                direction=sl_direction,
                 on_reach=sl_callback,
-                barrier_price=sl_barrier,
+                barrier_price=self.main_entry_price,
                 barrier_side=sl_barrier_side
             )
 
-            self.sl_watch_key = f"{sl_price}_{direction}_{sl_barrier}_{sl_barrier_side}"
-
+            # Watch 2: Триггер
             trigger_callback = self._create_trigger_callback()
             self.price_stream.watch_price(
                 target_price=trigger_price,
-                direction=direction,
-                on_reach=trigger_callback
+                direction=trigger_direction,
+                on_reach=trigger_callback,
+                barrier_price=self.main_entry_price,
+                barrier_side=trigger_barrier_side
             )
-
-            self.trigger_watch_key = f"{trigger_price}_{direction}_None_None"
 
         except Exception as e:
             logger.error(f"Ошибка установки стопа хеджа: {e}")
 
-
-
-
-
     async def _on_sl_price_reached(self, current_price: float):
-        """Колбек когда цена достигает SL (хедж закрывается в минус)"""
+        """Колбек когда цена достигает SL (хедж закрывается в убыток)"""
         try:
             self.failure_count += 1
             logger.warning(
@@ -452,16 +455,13 @@ class HedgingStrategy:
                 f"Убыточных хеджей: {self.failure_count}/{self.hedging_config['max_failures']}"
             )
 
-            self.price_stream.cancel_watch(
-                target_price=self.hedge_entry_price or 0,
-                direction='',
-                barrier_price=None,
-                barrier_side=None
-            )
+            # Отменяем все текущие watch'и
+            self.price_stream.cancel_all_watches()
 
             if self.failure_count >= self.hedging_config['max_failures']:
                 logger.error(f"Достигнут лимит убыточных хеджей ({self.failure_count}). Цикл остановлен.")
                 self.active_stop_order_id = None
+                self.hedge_entry_price = None
                 return
 
             self.active_stop_order_id = None
@@ -473,9 +473,12 @@ class HedgingStrategy:
             logger.error(f"Ошибка обработки SL: {e}")
 
     async def _on_trigger_price_reached(self, current_price: float):
-        """Колбек когда цена достигает триггера (пора переносить стоп)"""
+        """Колбек когда цена достигает триггера (пора переносить стоп в профит)"""
         try:
             logger.info(f"Триггер достигнут (${current_price:.2f}), переносим стоп в профит")
+
+            # Отменяем все текущие watch'и (SL и триггер)
+            self.price_stream.cancel_all_watches()
 
             tp_pnl = self.hedging_config['tp_pnl']
             tp_price = self.exchange.calculate_new_stop_price(
@@ -493,14 +496,24 @@ class HedgingStrategy:
             if success:
                 logger.info(f"Стоп перенесён на TP цену ${tp_price:.2f} (в профит)")
 
-                if self.sl_watch_key:
-                    self.price_stream.cancel_watch(
-                        target_price=0,
-                        direction='',
-                        barrier_price=None,
-                        barrier_side=None
-                    )
-                    self.sl_watch_key = None
+                # Watch для нового SL (в профит)
+                # Для SHORT: цена растёт СНИЗУ ВВЕРХ от триггера к TP
+                # Для LONG: цена падает СВЕРХУ ВНИЗ от триггера к TP
+                if self.hedge_position_side == 'SHORT':
+                    tp_direction = 'long'
+                    tp_barrier_side = 'below'
+                else:  # LONG
+                    tp_direction = 'short'
+                    tp_barrier_side = 'above'
+
+                tp_callback = self._create_tp_callback()
+                self.price_stream.watch_price(
+                    target_price=tp_price,
+                    direction=tp_direction,
+                    on_reach=tp_callback,
+                    barrier_price=current_price,
+                    barrier_side=tp_barrier_side
+                )
 
             else:
                 logger.error("Не удалось обновить стоп")
@@ -508,11 +521,27 @@ class HedgingStrategy:
         except Exception as e:
             logger.error(f"Ошибка обработки триггера: {e}")
 
+    async def _on_tp_price_reached(self, current_price: float):
+        """Колбек когда цена достигает TP (хедж закрывается в профит)"""
+        try:
+            logger.info(f"TP достигнут (${current_price:.2f}), хедж закрывается в профит")
+
+            # Отменяем все watch'и
+            self.price_stream.cancel_all_watches()
+
+            # Очищаем состояние хеджа
+            self.active_stop_order_id = None
+            self.hedge_entry_price = None
+
+            # Перезапускаем цикл отслеживания активации
+            await self._restart_hedging_cycle()
+
+        except Exception as e:
+            logger.error(f"Ошибка обработки TP: {e}")
+
     async def _restart_hedging_cycle(self):
         """Перезапускает цикл отслеживания активации хеджа"""
         try:
-            await self._cancel_all_watches_and_stops()
-
             activation_pnl = self.hedging_config['activation_pnl']
             activation_price = self.exchange.calculate_activation_price(
                 self.main_entry_price,
@@ -520,22 +549,21 @@ class HedgingStrategy:
                 activation_pnl
             )
 
+            # Для LONG: цена должна упасть (direction='short')
+            # Для SHORT: цена должна вырасти (direction='long')
             direction = 'short' if self.main_position_side == 'LONG' else 'long'
-            barrier_price = self.hedge_entry_price or self.main_entry_price
-            barrier_side = 'below' if self.main_position_side == 'LONG' else 'above'
 
-            logger.info(f"Перезапуск цикла: отслеживаем {activation_pnl}% = ${activation_price:.2f}")
+            logger.info(
+                f"Перезапускаем отслеживание. При PNL основной позиции {activation_pnl}% "
+                f"(цена ${activation_price:.2f}) откроем новый хедж"
+            )
 
             callback = self._create_activation_callback()
             self.price_stream.watch_price(
                 target_price=activation_price,
                 direction=direction,
-                on_reach=callback,
-                barrier_price=barrier_price,
-                barrier_side=barrier_side
+                on_reach=callback
             )
-
-            self.activation_watch_key = f"{activation_price}_{direction}_{barrier_price}_{barrier_side}"
 
         except Exception as e:
             logger.error(f"Ошибка перезапуска цикла: {e}")
@@ -549,10 +577,6 @@ class HedgingStrategy:
                 await self.exchange.cancel_all_stop_losses(self.symbol)
                 self.active_stop_order_id = None
 
-            self.activation_watch_key = None
-            self.sl_watch_key = None
-            self.trigger_watch_key = None
-
             logger.info("Все watch-цены и стопы отменены")
 
         except Exception as e:
@@ -560,23 +584,35 @@ class HedgingStrategy:
 
     def _create_activation_callback(self):
         """Создаёт async callback для активации хеджа"""
+
         async def callback(current_price: float) -> None:
             await self._on_activation_price_reached(current_price)
+
         return callback
 
     def _create_sl_callback(self):
         """Создаёт async callback для SL"""
+
         async def callback(current_price: float) -> None:
             await self._on_sl_price_reached(current_price)
+
         return callback
 
     def _create_trigger_callback(self):
         """Создаёт async callback для триггера"""
+
         async def callback(current_price: float) -> None:
             await self._on_trigger_price_reached(current_price)
+
         return callback
 
+    def _create_tp_callback(self):
+        """Создаёт async callback для TP"""
 
+        async def callback(current_price: float) -> None:
+            await self._on_tp_price_reached(current_price)
+
+        return callback
 
     @staticmethod
     def _get_position_size() -> float:
