@@ -81,7 +81,7 @@ class BinancePriceStream:
             'barrier_crossed': False
         }
 
-        logger.info(f"Добавили отслеживание цены ${target_price:.2f} для {self.symbol.upper()}")
+        logger.info(f"Добавили отслеживание цены ${target_price:.2f}")
 
     def cancel_watch(self, target_price: float, direction: str,
                      barrier_price: Optional[float] = None,
@@ -90,14 +90,14 @@ class BinancePriceStream:
         watch_key = f"{target_price}_{direction}_{barrier_price}_{barrier_side}"
         if watch_key in self.watched_prices:
             del self.watched_prices[watch_key]
-            logger.info(f"Отменили отслеживание цены ${target_price:.2f} для {self.symbol.upper()}")
+            logger.info(f"Отменили отслеживание цены ${target_price:.2f}")
 
     def cancel_all_watches(self):
         """Отменяет ВСЕ отслеживания цен"""
         count = len(self.watched_prices)
         self.watched_prices.clear()
         if count > 0:
-            logger.info(f"Отменили все {count} отслеживаний цен для {self.symbol.upper()}")
+            logger.info(f"Отменили все {count} отслеживаний цен")
 
     async def _connection_loop(self):
         """
@@ -250,14 +250,15 @@ class BinancePriceStream:
             if should_trigger:
                 watch_data['triggered'] = True
                 logger.info(
-                    f"Цена ${current_price:.2f} достигла целевого уровня ${target_price:.2f} для {self.symbol.upper()}")
+                    f"Цена достигла целевого уровня ${target_price:.2f}")
 
                 try:
                     await on_reach(current_price)
                 except Exception as e:
                     logger.error(f"Ошибка в колбеке watch_price: {e}")
 
-                del self.watched_prices[watch_key]
+                if watch_key in self.watched_prices:
+                    del self.watched_prices[watch_key]
 
     def get_last_price(self) -> Optional[float]:
         """Возвращает последнюю известную цену"""

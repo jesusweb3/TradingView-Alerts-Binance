@@ -352,9 +352,6 @@ class HedgingBinanceClient:
                 priceProtect=True
             )
 
-            self.logger.info(
-                f"Стоп-лосс выставлен: {symbol} ({position_side}), stop={stop_price}"
-            )
             return result
 
         except Exception as e:
