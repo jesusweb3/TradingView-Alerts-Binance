@@ -24,30 +24,35 @@ class SetupHedgeStops:
         """
         Рассчитывает уровни SL и TRIGGER для хеджа
 
-        Формулы:
+        Формулы (правильные, через умножение на процент):
+        movement_percent = pnl / (100 * leverage)
         LONG хедж:
-          - SL = entry + (sl_pnl / leverage)      # sl_pnl отрицательный (-3)
-          - TRIGGER = entry + (trigger_pnl / leverage)  # trigger_pnl положительный (+3)
+          - SL = entry * (1 + movement_percent)      # sl_pnl отрицательный (-3)
+          - TRIGGER = entry * (1 + movement_percent)  # trigger_pnl положительный (+5)
 
         SHORT хедж:
-          - SL = entry - (sl_pnl / leverage)      # sl_pnl отрицательный (-3)
-          - TRIGGER = entry - (trigger_pnl / leverage)  # trigger_pnl положительный (+3)
+          - SL = entry * (1 - movement_percent)      # sl_pnl отрицательный (-3)
+          - TRIGGER = entry * (1 - movement_percent)  # trigger_pnl положительный (+5)
 
         Примеры (leverage=4):
-        SHORT хедж, entry=3950, sl_pnl=-3%, trigger_pnl=3%:
-          - SL = 3950 - (-3/4) = 3950 + 0.75% = 3979.62
-          - TRIGGER = 3950 - (3/4) = 3950 - 0.75% = 3920.37
+        SHORT хедж, entry=3950, sl_pnl=-3%, trigger_pnl=5%:
+          - sl_movement = -3 / 400 = -0.0075
+          - SL = 3950 * (1 - (-0.0075)) = 3950 * 1.0075 = 3979.625$ ✓
+          - trigger_movement = 5 / 400 = 0.0125
+          - TRIGGER = 3950 * (1 - 0.0125) = 3950 * 0.9875 = 3900.625$ ✓
 
-        LONG хедж, entry=3950, sl_pnl=-3%, trigger_pnl=3%:
-          - SL = 3950 + (-3/4) = 3950 - 0.75% = 3920.38
-          - TRIGGER = 3950 + (3/4) = 3950 + 0.75% = 3979.62
+        LONG хедж, entry=4050, sl_pnl=-3%, trigger_pnl=5%:
+          - sl_movement = -3 / 400 = -0.0075
+          - SL = 4050 * (1 + (-0.0075)) = 4050 * 0.9925 = 4019.625$ ✓
+          - trigger_movement = 5 / 400 = 0.0125
+          - TRIGGER = 4050 * (1 + 0.0125) = 4050 * 1.0125 = 4100.625$ ✓
 
         Args:
             hedge_entry_price: ТВХ хеджа
             hedge_position_side: 'LONG' или 'SHORT'
             leverage: Кредитное плечо
             sl_pnl: SL в процентах PNL (обычно -3)
-            trigger_pnl: TRIGGER в процентах PNL (обычно +3)
+            trigger_pnl: TRIGGER в процентах PNL (обычно +5)
 
         Returns:
             {
@@ -67,30 +72,27 @@ class SetupHedgeStops:
                 f"{hedge_position_side} (ТВХ=${hedge_entry_price:.2f})"
             )
 
-            sl_movement = sl_pnl / leverage
-            trigger_movement = trigger_pnl / leverage
+            sl_movement_percent = sl_pnl / (100 * leverage)
+            trigger_movement_percent = trigger_pnl / (100 * leverage)
 
             if hedge_position_side == 'LONG':
-                sl_price = hedge_entry_price + sl_movement
-                trigger_price = hedge_entry_price + trigger_movement
+                sl_price = hedge_entry_price * (1 + sl_movement_percent)
+                trigger_price = hedge_entry_price * (1 + trigger_movement_percent)
                 sl_direction = 'вверх'
                 trigger_direction = 'вверх'
             else:  # SHORT
-                sl_price = hedge_entry_price - sl_movement
-                trigger_price = hedge_entry_price - trigger_movement
+                sl_price = hedge_entry_price * (1 - sl_movement_percent)
+                trigger_price = hedge_entry_price * (1 - trigger_movement_percent)
                 sl_direction = 'вниз'
                 trigger_direction = 'вниз'
 
-            sl_movement_percent = (sl_movement / hedge_entry_price) * 100
-            trigger_movement_percent = (trigger_movement / hedge_entry_price) * 100
-
             logger.info(
                 f"SL уровень (PNL {sl_pnl}%): ${sl_price:.2f} "
-                f"({sl_direction}, {sl_movement_percent:.3f}%)"
+                f"({sl_direction}, {sl_movement_percent*100:.3f}%)"
             )
             logger.info(
                 f"TRIGGER уровень (PNL {trigger_pnl}%): ${trigger_price:.2f} "
-                f"({trigger_direction}, {trigger_movement_percent:.3f}%)"
+                f"({trigger_direction}, {trigger_movement_percent*100:.3f}%)"
             )
 
             return {
@@ -99,8 +101,8 @@ class SetupHedgeStops:
                 'hedge_entry_price': hedge_entry_price,
                 'sl_price': sl_price,
                 'trigger_price': trigger_price,
-                'sl_movement_percent': sl_movement_percent,
-                'trigger_movement_percent': trigger_movement_percent,
+                'sl_movement_percent': sl_movement_percent * 100,
+                'trigger_movement_percent': trigger_movement_percent * 100,
                 'error': None
             }
 

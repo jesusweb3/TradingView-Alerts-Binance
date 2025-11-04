@@ -8,7 +8,7 @@ from src.utils.retry_handler import retry_on_api_error
 
 
 class HedgingBinanceClient:
-    """Async клиент Binance для hedging стратегии"""
+    """Async клиент Binance для hedging стратегии (LONG + SHORT позиции одновременно)"""
 
     def __init__(self, api_key: str, secret: str, position_size: float, leverage: int, symbol: str):
         self.name = "Binance"
@@ -359,56 +359,6 @@ class HedgingBinanceClient:
             return None
 
     @retry_on_api_error()
-    async def update_stop_loss_order(self, symbol: str, position_side: str,
-                                     new_stop_price: float) -> bool:
-        """
-        Обновляет существующий стоп-лосс ордер (отменяет старый, выставляет новый)
-
-        Args:
-            symbol: Торговый символ
-            position_side: 'LONG' или 'SHORT'
-            new_stop_price: Новая цена стопа
-
-        Returns:
-            True если успешно, False иначе
-        """
-        try:
-            close_side = 'SELL' if position_side == 'LONG' else 'BUY'
-
-            orders = await self.get_open_orders(symbol)
-
-            old_stop_found = False
-            for order in orders:
-                if (order.get('type') == 'STOP_MARKET' and
-                        order.get('side') == close_side and
-                        order.get('positionSide') == position_side):
-                    await self.client.futures_cancel_order(
-                        symbol=symbol,
-                        orderId=order['orderId']
-                    )
-                    self.logger.info(
-                        f"Старый стоп отменён: {symbol} ({position_side}), "
-                        f"была цена {order.get('stopPrice')}"
-                    )
-                    old_stop_found = True
-                    break
-
-            if not old_stop_found:
-                self.logger.warning(f"Старый стоп не найден для {symbol} ({position_side})")
-
-            result = await self.place_stop_loss_order(
-                symbol=symbol,
-                position_side=position_side,
-                stop_price=new_stop_price
-            )
-
-            return result is not None
-
-        except Exception as e:
-            self.logger.error(f"Ошибка обновления стопа для {symbol} ({position_side}): {e}")
-            return False
-
-    @retry_on_api_error()
     async def cancel_stop_loss_order(self, symbol: str, order_id: str) -> bool:
         """
         Отменяет стоп-лосс ордер по ID
@@ -538,15 +488,19 @@ class HedgingBinanceClient:
         """
         Рассчитывает цену активации хеджа по заданному PNL проценту
 
-        Формула:
-        LONG:  activation_price = entry_price + (pnl / (100 * leverage))
-        SHORT: activation_price = entry_price - (pnl / (100 * leverage))
+        Формула (правильная через умножение):
+        movement_percent = activation_pnl / (100 * leverage)
+        LONG:  price = entry_price * (1 + movement_percent)
+        SHORT: price = entry_price * (1 - movement_percent)
 
         Примеры:
         LONG: entry=4000, pnl=-5%, leverage=4
-          → 4000 + (-5 / 400) = 4000 - 1.25% = 3950$
+          movement = -5 / 400 = -0.0125
+          price = 4000 * (1 + (-0.0125)) = 4000 * 0.9875 = 3950$ ✓
+
         SHORT: entry=4000, pnl=-5%, leverage=4
-          → 4000 - (-5 / 400) = 4000 + 1.25% = 4050$
+          movement = -5 / 400 = -0.0125
+          price = 4000 * (1 - (-0.0125)) = 4000 * 1.0125 = 4050$ ✓
 
         Args:
             entry_price: Цена входа
@@ -556,12 +510,12 @@ class HedgingBinanceClient:
         Returns:
             Целевая цена для активации хеджа (округленная по правилам биржи)
         """
-        movement = activation_pnl / (100 * self.leverage)
+        movement_percent = activation_pnl / (100 * self.leverage)
 
         if position_side == 'LONG':
-            result = entry_price + movement
-        else:
-            result = entry_price - movement
+            result = entry_price * (1 + movement_percent)
+        else:  # SHORT
+            result = entry_price * (1 - movement_percent)
 
         return self.round_price(self.symbol, result)
 
@@ -570,15 +524,19 @@ class HedgingBinanceClient:
         """
         Рассчитывает цену стоп-лосса по заданному PNL проценту
 
-        Формула:
-        LONG:  sl_price = entry_price + (pnl / (100 * leverage))
-        SHORT: sl_price = entry_price - (pnl / (100 * leverage))
+        Формула (правильная через умножение):
+        movement_percent = stop_pnl / (100 * leverage)
+        LONG:  price = entry_price * (1 + movement_percent)
+        SHORT: price = entry_price * (1 - movement_percent)
 
         Примеры:
         SHORT хедж: entry=3950, pnl=-3%, leverage=4
-          → 3950 - (-3 / 400) = 3950 + 0.75% = 3979.62$
+          movement = -3 / 400 = -0.0075
+          price = 3950 * (1 - (-0.0075)) = 3950 * 1.0075 = 3979.625$ ✓
+
         LONG хедж: entry=3950, pnl=-3%, leverage=4
-          → 3950 + (-3 / 400) = 3950 - 0.75% = 3920.38$
+          movement = -3 / 400 = -0.0075
+          price = 3950 * (1 + (-0.0075)) = 3950 * 0.9925 = 3920.375$ ✓
 
         Args:
             entry_price: Цена входа
@@ -588,12 +546,12 @@ class HedgingBinanceClient:
         Returns:
             Цена стоп-лосса (округленная по правилам биржи)
         """
-        movement = stop_pnl / (100 * self.leverage)
+        movement_percent = stop_pnl / (100 * self.leverage)
 
         if position_side == 'LONG':
-            result = entry_price + movement
-        else:
-            result = entry_price - movement
+            result = entry_price * (1 + movement_percent)
+        else:  # SHORT
+            result = entry_price * (1 - movement_percent)
 
         return self.round_price(self.symbol, result)
 
@@ -602,15 +560,19 @@ class HedgingBinanceClient:
         """
         Рассчитывает цену триггера (когда PNL достигнет положительного значения)
 
-        Формула:
-        LONG:  trigger_price = entry_price + (pnl / (100 * leverage))
-        SHORT: trigger_price = entry_price - (pnl / (100 * leverage))
+        Формула (правильная через умножение):
+        movement_percent = trigger_pnl / (100 * leverage)
+        LONG:  price = entry_price * (1 + movement_percent)
+        SHORT: price = entry_price * (1 - movement_percent)
 
         Примеры:
         SHORT хедж: entry=3950, pnl=3%, leverage=4
-          → 3950 - (3 / 400) = 3950 - 0.75% = 3920.37$
+          movement = 3 / 400 = 0.0075
+          price = 3950 * (1 - 0.0075) = 3950 * 0.9925 = 3920.375$ ✓
+
         LONG хедж: entry=3950, pnl=3%, leverage=4
-          → 3950 + (3 / 400) = 3950 + 0.75% = 3979.62$
+          movement = 3 / 400 = 0.0075
+          price = 3950 * (1 + 0.0075) = 3950 * 1.0075 = 3979.625$ ✓
 
         Args:
             entry_price: Цена входа
@@ -620,12 +582,12 @@ class HedgingBinanceClient:
         Returns:
             Цена триггера (округленная по правилам биржи)
         """
-        movement = trigger_pnl / (100 * self.leverage)
+        movement_percent = trigger_pnl / (100 * self.leverage)
 
         if position_side == 'LONG':
-            result = entry_price + movement
-        else:
-            result = entry_price - movement
+            result = entry_price * (1 + movement_percent)
+        else:  # SHORT
+            result = entry_price * (1 - movement_percent)
 
         return self.round_price(self.symbol, result)
 
@@ -634,20 +596,19 @@ class HedgingBinanceClient:
         """
         Рассчитывает цену нового стопа (TP в профите) - страховка профита
 
-        Формула (разная для LONG и SHORT):
-        LONG хедж:
-          - tp_price = entry_price * (1 + pnl / (100 * leverage))
-          - Цена ВЫШЕ entry (в профите для LONG)
-
-        SHORT хедж:
-          - tp_price = entry_price * (1 - pnl / (100 * leverage))
-          - Цена НИЖЕ entry (в профите для SHORT)
+        Формула (правильная через умножение):
+        movement_percent = tp_pnl / (100 * leverage)
+        LONG:  price = entry_price * (1 + movement_percent)
+        SHORT: price = entry_price * (1 - movement_percent)
 
         Примеры (tp_pnl=2%, leverage=4):
-        LONG хедж: entry=4000
-          → 4000 * (1 + 0.005) = 4020$ (выше entry, в профите)
-        SHORT хедж: entry=4000
-          → 4000 * (1 - 0.005) = 3980$ (ниже entry, в профите)
+        LONG хедж: entry=3950
+          movement = 2 / 400 = 0.005
+          price = 3950 * (1 + 0.005) = 3950 * 1.005 = 3969.75$ (выше entry, в профите) ✓
+
+        SHORT хедж: entry=3950
+          movement = 2 / 400 = 0.005
+          price = 3950 * (1 - 0.005) = 3950 * 0.995 = 3930.25$ (ниже entry, в профите) ✓
 
         Args:
             entry_price: Цена входа хеджа
@@ -657,12 +618,12 @@ class HedgingBinanceClient:
         Returns:
             Цена нового стоп-лосса (в профите, округленная по правилам биржи)
         """
-        movement = tp_pnl / (100 * self.leverage)
+        movement_percent = tp_pnl / (100 * self.leverage)
 
         if position_side == 'LONG':
-            result = entry_price * (1 + movement)
+            result = entry_price * (1 + movement_percent)
         else:  # SHORT
-            result = entry_price * (1 - movement)
+            result = entry_price * (1 - movement_percent)
 
         return self.round_price(self.symbol, result)
 
