@@ -13,16 +13,15 @@ class SetupHedgeStops:
         self.exchange = exchange
         self.symbol = exchange.symbol
 
-    @staticmethod
     def execute(
+        self,
         hedge_entry_price: float,
         hedge_position_side: str,
-        leverage: int,
         sl_pnl: float,
         trigger_pnl: float
     ) -> Dict[str, Any]:
         """
-        Рассчитывает уровни SL и TRIGGER для хеджа
+        Рассчитывает уровни SL и TRIGGER для хеджа через методы exchange
 
         Формулы (правильные, через умножение на процент):
         movement_percent = pnl / (100 * leverage)
@@ -50,7 +49,6 @@ class SetupHedgeStops:
         Args:
             hedge_entry_price: ТВХ хеджа
             hedge_position_side: 'LONG' или 'SHORT'
-            leverage: Кредитное плечо
             sl_pnl: SL в процентах PNL (обычно -3)
             trigger_pnl: TRIGGER в процентах PNL (обычно +5)
 
@@ -72,27 +70,36 @@ class SetupHedgeStops:
                 f"{hedge_position_side} (ТВХ=${hedge_entry_price:.2f})"
             )
 
-            sl_movement_percent = sl_pnl / (100 * leverage)
-            trigger_movement_percent = trigger_pnl / (100 * leverage)
+            sl_price = self.exchange.calculate_stop_loss_price(
+                entry_price=hedge_entry_price,
+                position_side=hedge_position_side,
+                stop_pnl=sl_pnl
+            )
+
+            trigger_price = self.exchange.calculate_trigger_price(
+                entry_price=hedge_entry_price,
+                position_side=hedge_position_side,
+                trigger_pnl=trigger_pnl
+            )
+
+            leverage = self.exchange.leverage
+            sl_movement_percent = (sl_pnl / (100 * leverage)) * 100
+            trigger_movement_percent = (trigger_pnl / (100 * leverage)) * 100
 
             if hedge_position_side == 'LONG':
-                sl_price = hedge_entry_price * (1 + sl_movement_percent)
-                trigger_price = hedge_entry_price * (1 + trigger_movement_percent)
-                sl_direction = 'вверх'
-                trigger_direction = 'вверх'
-            else:  # SHORT
-                sl_price = hedge_entry_price * (1 - sl_movement_percent)
-                trigger_price = hedge_entry_price * (1 - trigger_movement_percent)
                 sl_direction = 'вниз'
+                trigger_direction = 'вверх'
+            else:
+                sl_direction = 'вверх'
                 trigger_direction = 'вниз'
 
             logger.info(
                 f"SL уровень (PNL {sl_pnl}%): ${sl_price:.2f} "
-                f"({sl_direction}, {sl_movement_percent*100:.3f}%)"
+                f"({sl_direction}, {sl_movement_percent:.3f}%)"
             )
             logger.info(
                 f"TRIGGER уровень (PNL {trigger_pnl}%): ${trigger_price:.2f} "
-                f"({trigger_direction}, {trigger_movement_percent*100:.3f}%)"
+                f"({trigger_direction}, {trigger_movement_percent:.3f}%)"
             )
 
             return {
@@ -101,8 +108,8 @@ class SetupHedgeStops:
                 'hedge_entry_price': hedge_entry_price,
                 'sl_price': sl_price,
                 'trigger_price': trigger_price,
-                'sl_movement_percent': sl_movement_percent * 100,
-                'trigger_movement_percent': trigger_movement_percent * 100,
+                'sl_movement_percent': sl_movement_percent,
+                'trigger_movement_percent': trigger_movement_percent,
                 'error': None
             }
 

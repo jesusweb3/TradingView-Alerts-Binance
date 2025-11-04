@@ -18,7 +18,6 @@ class StartActivationTracking:
         self,
         main_position_side: str,
         main_entry_price: float,
-        leverage: int,
         activation_pnl: float,
         on_activation_callback: Callable[[float], Coroutine],
         barrier_price: Optional[float] = None,
@@ -27,14 +26,23 @@ class StartActivationTracking:
         """
         Запускает отслеживание цены активации хеджа
 
-        Формулы:
-        LONG:  activation_price = entry_price + (pnl / leverage)
-        SHORT: activation_price = entry_price - (pnl / leverage)
+        Формулы (правильные):
+        movement_percent = activation_pnl / (100 * leverage)
+        LONG:  activation_price = entry_price * (1 + movement_percent)
+        SHORT: activation_price = entry_price * (1 - movement_percent)
+
+        Примеры:
+        LONG: entry=4000, pnl=-5%, leverage=4
+          movement = -5 / 400 = -0.0125
+          price = 4000 * (1 + (-0.0125)) = 4000 * 0.9875 = 3950$ ✓
+
+        SHORT: entry=4000, pnl=-5%, leverage=4
+          movement = -5 / 400 = -0.0125
+          price = 4000 * (1 - (-0.0125)) = 4000 * 1.0125 = 4050$ ✓
 
         Args:
             main_position_side: 'LONG' или 'SHORT'
             main_entry_price: ТВХ основной позиции
-            leverage: Кредитное плечо (из конфига)
             activation_pnl: PNL процент активации (обычно -5)
             on_activation_callback: Async callback при срабатывании
             barrier_price: Опциональный уровень для barrier-логики (перезапуск после TP)
@@ -52,16 +60,16 @@ class StartActivationTracking:
             }
         """
         try:
-            movement = activation_pnl / leverage
+            activation_price = self.exchange.calculate_activation_price(
+                entry_price=main_entry_price,
+                position_side=main_position_side,
+                activation_pnl=activation_pnl
+            )
 
             if main_position_side == 'LONG':
-                activation_price = main_entry_price + movement
-                direction = 'short'  # Цена должна падать для LONG
-            else:  # SHORT
-                activation_price = main_entry_price - movement
-                direction = 'long'   # Цена должна расти для SHORT
-
-            activation_price = self.exchange.round_price(self.symbol, activation_price)
+                direction = 'short'
+            else:
+                direction = 'long'
 
             logger.info(
                 f"Запускаем отслеживание активации хеджа: "

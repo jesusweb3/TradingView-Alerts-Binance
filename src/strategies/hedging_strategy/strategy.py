@@ -12,7 +12,6 @@ from src.strategies.hedging_strategy.step2_ensure_hedge_mode import EnsureHedgeM
 from src.strategies.hedging_strategy.step3_parse_signal import ParseSignal
 from src.strategies.hedging_strategy.step4_filter_duplicate_signal import FilterDuplicateSignal
 from src.strategies.hedging_strategy.step5_handle_incoming_signal import HandleIncomingSignal
-from src.strategies.hedging_strategy.step6_close_old_position_from_startup import CloseOldPositionFromStartup
 from src.strategies.hedging_strategy.step7_open_new_main_position import OpenNewMainPosition
 from src.strategies.hedging_strategy.step8_close_and_reverse_main import CloseAndReverseMain
 from src.strategies.hedging_strategy.step9_convert_hedge_to_main import ConvertHedgeToMain
@@ -183,11 +182,9 @@ class HedgingStrategy:
 
             main_position_open = self.main_position_side is not None
             hedge_position_open = self.hedge_position_side is not None
-            positions_found_at_startup = self.last_action is not None and self.main_position_side is None
 
             handle_result = HandleIncomingSignal.execute(
                 action,
-                positions_found_at_startup,
                 main_position_open,
                 hedge_position_open
             )
@@ -198,11 +195,7 @@ class HedgingStrategy:
             logger.info(f"Выбран сценарий: {scenario}")
             logger.info(f"Следующий шаг: {next_step}")
 
-            if scenario == 'old_position_from_startup':
-                await self._handle_old_position_from_startup()
-                await self._open_new_main_position(action)
-
-            elif scenario == 'no_position':
+            if scenario == 'no_position':
                 await self._open_new_main_position(action)
 
             elif scenario == 'main_only':
@@ -221,36 +214,8 @@ class HedgingStrategy:
             logger.error(f"Ошибка обработки сигнала {action}: {e}")
             return False
 
-    async def _handle_old_position_from_startup(self):
-        """Закрытие старой позиции со старта (scenario A)"""
-        try:
-            if self.main_position_side is None or self.previous_position_volume is None:
-                logger.info("Старой позиции нет (восстановления не было), пропускаем закрытие")
-                return
-
-            logger.info("Закрываем старую позицию со старта...")
-
-            step6 = CloseOldPositionFromStartup(self.exchange)
-            close_result = await step6.execute(
-                previous_position_side=self.main_position_side,
-                previous_position_volume=self.previous_position_volume
-            )
-
-            if close_result.get('success'):
-                self.main_position_side = None
-                self.main_entry_price = None
-                self.previous_position_volume = None
-                self.hedge_position_side = None
-                self.hedge_entry_price = None
-                logger.info("Старая позиция закрыта ✓")
-            else:
-                logger.error("Не удалось закрыть старую позицию")
-
-        except Exception as e:
-            logger.error(f"Ошибка закрытия старой позиции: {e}")
-
     async def _open_new_main_position(self, action: Action):
-        """Открытие новой основной позиции (scenario B, также используется в A)"""
+        """Открытие новой основной позиции (сценарий Б)"""
         try:
             logger.info(f"Открываем новую основную позицию {action.upper()}...")
 
@@ -287,7 +252,7 @@ class HedgingStrategy:
             logger.error(f"Ошибка открытия основной позиции: {e}")
 
     async def _close_and_reverse_main(self, action: Action):
-        """Закрытие текущей основной + открытие новой (scenario C)"""
+        """Закрытие текущей основной + открытие новой (сценарий В)"""
         try:
             logger.info("Закрываем текущую основную и открываем новую в противоположном направлении...")
 
@@ -324,7 +289,7 @@ class HedgingStrategy:
             logger.error(f"Ошибка разворота позиции: {e}")
 
     async def _convert_hedge_to_main(self):
-        """Конвертация хеджа в основную при новом сигнале (scenario D)"""
+        """Конвертация хеджа в основную при новом сигнале (сценарий Г)"""
         try:
             logger.info("Конвертируем хедж в основную позицию...")
 
@@ -377,7 +342,6 @@ class HedgingStrategy:
             activation_result = await step10.execute(
                 main_position_side=self.main_position_side,
                 main_entry_price=self.main_entry_price,
-                leverage=self.exchange.leverage,
                 activation_pnl=self.activation_pnl,
                 on_activation_callback=on_activation,
                 barrier_price=self.tp_price_for_barrier,
@@ -441,7 +405,6 @@ class HedgingStrategy:
             stops_result = step12.execute(
                 hedge_entry_price=self.hedge_entry_price,
                 hedge_position_side=self.hedge_position_side,
-                leverage=self.exchange.leverage,
                 sl_pnl=self.sl_pnl,
                 trigger_pnl=self.trigger_pnl
             )

@@ -25,7 +25,7 @@ class OnTriggerHit:
         on_tp_callback: Callable[[float], Coroutine]
     ) -> Dict[str, Any]:
         """
-        Обрабатывает срабатывание TRIGGER (PNL хеджа достиг +3%)
+        Обрабатывает срабатывание TRIGGER (PNL хеджа достиг +5%)
 
         Процесс:
         1. Отменить оба watch'а (SL + TRIGGER)
@@ -151,9 +151,9 @@ class OnTriggerHit:
             logger.info("Запускаем watch на TP цену")
 
             if hedge_position_side == 'LONG':
-                tp_direction = 'long'   # Цена должна расти для профита LONG хеджа
-            else:  # SHORT
-                tp_direction = 'short'  # Цена должна падать для профита SHORT хеджа
+                tp_direction = 'long'
+            else:
+                tp_direction = 'short'
 
             self.price_stream.watch_price(
                 target_price=tp_price,

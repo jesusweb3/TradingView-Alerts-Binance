@@ -11,19 +11,31 @@ class HandleIncomingSignal:
 
     @staticmethod
     def execute(
-        action: str,
-        positions_found_at_startup: bool,
-        main_position_open: bool,
-        hedge_position_open: bool
+            action: str,
+            main_position_open: bool,
+            hedge_position_open: bool
     ) -> Dict[str, Any]:
         """
         Определяет какой сценарий обработки нужно применить
 
+        Четыре сценария (по состоянию позиций):
+
+        Сценарий Б: Позиций нет (main=0, hedge=0)
+          → Открыть новую основную позицию
+
+        Сценарий В: Только основная открыта (main=1, hedge=0)
+          → Закрыть текущую основную и открыть новую в противоположном направлении
+
+        Сценарий Г: Обе позиции открыты (main=1, hedge=1)
+          → Конвертировать хедж в основную позицию, закрыть старую основную
+
+        Сценарий А: Основная закрыта после старта (main=0, hedge=0)
+          → Пропустить закрытие (уже закрыта), затем перейти к Б
+
         Args:
             action: 'buy' или 'sell'
-            positions_found_at_startup: Были ли позиции при старте
-            main_position_open: Открыта ли основная позиция сейчас
-            hedge_position_open: Открыта ли хедж позиция сейчас
+            main_position_open: True если основная позиция открыта
+            hedge_position_open: True если хедж позиция открыта
 
         Returns:
             {
@@ -34,15 +46,6 @@ class HandleIncomingSignal:
             }
         """
         try:
-            if positions_found_at_startup and not main_position_open:
-                logger.info("Сценарий А: Была позиция при старте, уже обработана")
-                return {
-                    'scenario': 'old_position_from_startup',
-                    'next_step': 'step6_close_old_position_from_startup',
-                    'action': action,
-                    'details': {}
-                }
-
             if not main_position_open and not hedge_position_open:
                 logger.info("Сценарий Б: Позиций нет - открываем новую основную")
                 return {
