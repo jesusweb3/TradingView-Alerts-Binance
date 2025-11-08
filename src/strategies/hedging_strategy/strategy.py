@@ -40,19 +40,20 @@ class HedgingStrategy:
         hedging_config = config_manager.get_hedging_config()
 
         self.symbol = trading_config['symbol']
+        leverage = binance_config['leverage']
 
         self.exchange = HedgingBinanceClient(
             api_key=binance_config['api_key'],
             secret=binance_config['secret'],
             position_size=binance_config['position_size'],
-            leverage=binance_config['leverage'],
+            leverage=leverage,
             symbol=self.symbol
         )
 
-        self.activation_pnl = hedging_config['activation_pnl']
-        self.sl_pnl = hedging_config['sl_pnl']
-        self.trigger_pnl = hedging_config['trigger_pnl']
-        self.tp_pnl = hedging_config['tp_pnl']
+        self.activation_pnl = hedging_config['activation_pnl'] * leverage
+        self.sl_pnl = hedging_config['sl_pnl'] * leverage
+        self.trigger_pnl = hedging_config['trigger_pnl'] * leverage
+        self.tp_pnl = hedging_config['tp_pnl'] * leverage
         self.max_failures = hedging_config['max_failures']
 
         self.price_stream: Optional[BinancePriceStream] = None
@@ -214,6 +215,15 @@ class HedgingStrategy:
             logger.error(f"Ошибка обработки сигнала {action}: {e}")
             return False
 
+    def _reset_hedge_state(self):
+        """Обнуляет состояние хеджа после успешной операции"""
+        self.hedge_position_side = None
+        self.hedge_entry_price = None
+        self.active_stop_order_id = None
+        self.failure_count = 0
+        self.tp_price_for_barrier = None
+        self.barrier_side = None
+
     async def _open_new_main_position(self, action: Action):
         """Открытие новой основной позиции (сценарий Б)"""
         try:
@@ -232,12 +242,7 @@ class HedgingStrategy:
                 self.main_position_side = open_result.get('main_position_side')
                 self.main_entry_price = open_result.get('main_entry_price')
                 self.previous_position_volume = open_result.get('quantity')
-                self.hedge_position_side = None
-                self.hedge_entry_price = None
-                self.active_stop_order_id = None
-                self.failure_count = 0
-                self.tp_price_for_barrier = None
-                self.barrier_side = None
+                self._reset_hedge_state()
 
                 logger.info(
                     f"Основная позиция открыта: {self.main_position_side} "
@@ -269,12 +274,7 @@ class HedgingStrategy:
                 self.main_position_side = reverse_result.get('new_position_side')
                 self.main_entry_price = reverse_result.get('new_entry_price')
                 self.previous_position_volume = reverse_result.get('new_quantity')
-                self.hedge_position_side = None
-                self.hedge_entry_price = None
-                self.active_stop_order_id = None
-                self.failure_count = 0
-                self.tp_price_for_barrier = None
-                self.barrier_side = None
+                self._reset_hedge_state()
 
                 logger.info(
                     f"Разворот завершён: новая основная {self.main_position_side} "
@@ -310,13 +310,7 @@ class HedgingStrategy:
             if convert_result.get('success'):
                 self.main_position_side = convert_result.get('new_main_position_side')
                 self.main_entry_price = convert_result.get('new_main_entry_price')
-                self.previous_position_volume = self.previous_position_volume
-                self.hedge_position_side = None
-                self.hedge_entry_price = None
-                self.active_stop_order_id = None
-                self.failure_count = 0
-                self.tp_price_for_barrier = None
-                self.barrier_side = None
+                self._reset_hedge_state()
 
                 logger.info(
                     f"Конвертация завершена: хедж {convert_result.get('new_main_position_side')} "
@@ -337,7 +331,7 @@ class HedgingStrategy:
 
             step10 = StartActivationTracking(self.exchange, self.price_stream)
 
-            on_activation = self._create_on_activation_callback()
+            on_activation = self._create_callback(self._on_activation_reached)
 
             activation_result = await step10.execute(
                 main_position_side=self.main_position_side,
@@ -356,11 +350,12 @@ class HedgingStrategy:
         except Exception as e:
             logger.error(f"Ошибка запуска отслеживания активации: {e}")
 
-    def _create_on_activation_callback(self):
-        """Создаёт async callback для срабатывания activation_price"""
-        async def on_activation(current_price: float):
-            await self._on_activation_reached(current_price)
-        return on_activation
+    @staticmethod
+    def _create_callback(handler_func):
+        """Фабрика для создания async колбеков"""
+        async def callback(current_price: float):
+            await handler_func(current_price)
+        return callback
 
     async def _on_activation_reached(self, current_price: float):
         """ФАЗА 5: Срабатывание цены активации — открытие хеджа"""
@@ -446,15 +441,12 @@ class HedgingStrategy:
 
             step14 = StartDualTracking(self.price_stream)
 
-            on_sl = self._create_on_sl_callback()
-            on_trigger = self._create_on_trigger_callback()
-
             dual_result = await step14.execute(
                 sl_price=sl_price,
                 trigger_price=trigger_price,
                 hedge_position_side=self.hedge_position_side,
-                on_sl_callback=on_sl,
-                on_trigger_callback=on_trigger
+                on_sl_callback=self._create_callback(self._on_sl_hit),
+                on_trigger_callback=self._create_callback(self._on_trigger_hit)
             )
 
             if dual_result.get('success'):
@@ -464,18 +456,6 @@ class HedgingStrategy:
 
         except Exception as e:
             logger.error(f"Ошибка запуска двойного отслеживания: {e}")
-
-    def _create_on_sl_callback(self):
-        """Создаёт callback для SL срабатывания"""
-        async def on_sl(current_price: float):
-            await self._on_sl_hit(current_price)
-        return on_sl
-
-    def _create_on_trigger_callback(self):
-        """Создаёт callback для TRIGGER срабатывания"""
-        async def on_trigger(current_price: float):
-            await self._on_trigger_hit(current_price)
-        return on_trigger
 
     async def _on_sl_hit(self, current_price: float):
         """ФАЗА 7A: SL срабатывает первым"""
@@ -501,14 +481,12 @@ class HedgingStrategy:
                 logger.error(
                     f"Цикл хеджирования ОСТАНОВЛЕН (достигнут лимит неудачных хеджей {self.max_failures})"
                 )
-                self.hedge_entry_price = None
-                self.active_stop_order_id = None
+                self._reset_hedge_state()
                 return
 
             if sl_result.get('should_restart'):
                 logger.info("Перезагружаем цикл отслеживания activation_price")
-                self.hedge_entry_price = None
-                self.active_stop_order_id = None
+                self._reset_hedge_state()
                 await self._start_activation_tracking()
 
         except Exception as e:
@@ -528,7 +506,7 @@ class HedgingStrategy:
                 hedge_position_side=self.hedge_position_side,
                 active_stop_order_id=self.active_stop_order_id,
                 tp_pnl=self.tp_pnl,
-                on_tp_callback=self._create_on_tp_callback()
+                on_tp_callback=self._create_callback(self._on_tp_hit)
             )
 
             if not trigger_result.get('success'):
@@ -542,12 +520,6 @@ class HedgingStrategy:
 
         except Exception as e:
             logger.error(f"Ошибка обработки TRIGGER срабатывания: {e}")
-
-    def _create_on_tp_callback(self):
-        """Создаёт callback для TP срабатывания"""
-        async def on_tp(current_price: float):
-            await self._on_tp_hit(current_price)
-        return on_tp
 
     async def _on_tp_hit(self, current_price: float):
         """ФАЗА 7C: TP срабатывает — хедж закрыт в профит"""
@@ -570,14 +542,14 @@ class HedgingStrategy:
             )
 
             if tp_result.get('success'):
-                self.hedge_entry_price = None
-                self.active_stop_order_id = None
                 self.tp_price_for_barrier = tp_result.get('tp_price_for_barrier')
                 self.barrier_side = tp_result.get('barrier_side')
+                self.hedge_entry_price = None
+                self.active_stop_order_id = None
 
                 logger.info("Сохранены barrier-параметры для следующего цикла ✓")
-
                 logger.info("Перезагружаем цикл отслеживания activation_price с barrier-логикой")
+
                 await self._start_activation_tracking()
             else:
                 logger.error("Ошибка обработки TP срабатывания")
@@ -607,6 +579,24 @@ class HedgingStrategy:
         except Exception as e:
             logger.error(f"Ошибка при очистке ресурсов: {e}")
 
+    def _build_websocket_status(self) -> dict:
+        """Строит словарь статуса WebSocket"""
+        ws_stats = self.price_stream.get_connection_stats()
+        ws_status = {
+            'is_running': ws_stats['is_running'],
+            'is_connected': ws_stats['is_connected'],
+            'is_healthy': self.price_stream.is_healthy(),
+            'connection_count': ws_stats['connection_count'],
+            'last_price': ws_stats['last_price'],
+            'last_price_update': ws_stats['last_price_update'],
+            'last_successful_connection': ws_stats['last_successful_connection']
+        }
+
+        if 'current_downtime_seconds' in ws_stats:
+            ws_status['current_downtime_seconds'] = ws_stats['current_downtime_seconds']
+
+        return ws_status
+
     def get_status(self) -> dict:
         """Возвращает текущий статус стратегии"""
         status = {
@@ -632,17 +622,6 @@ class HedgingStrategy:
         }
 
         if self.price_stream:
-            ws_stats = self.price_stream.get_connection_stats()
-            status['websocket'] = {
-                'is_running': ws_stats['is_running'],
-                'is_connected': ws_stats['is_connected'],
-                'is_healthy': self.price_stream.is_healthy(),
-                'connection_count': ws_stats['connection_count'],
-                'last_price': ws_stats['last_price'],
-                'last_price_update': ws_stats['last_price_update'],
-                'last_successful_connection': ws_stats['last_successful_connection']
-            }
-            if 'current_downtime_seconds' in ws_stats:
-                status['websocket']['current_downtime_seconds'] = ws_stats['current_downtime_seconds']
+            status['websocket'] = self._build_websocket_status()
 
         return status
