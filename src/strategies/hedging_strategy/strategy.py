@@ -179,6 +179,13 @@ class HedgingStrategy:
         try:
             logger.info(f"=== ФАЗА 2-3: ПОЛУЧЕНИЕ И ОБРАБОТКА СИГНАЛА {action.upper()} ===")
 
+            logger.info("Очищаем все старые watch'и для начала новой обработки сигнала")
+            try:
+                self.price_stream.cancel_all_watches()
+                logger.info("Все старые watch'и очищены")
+            except Exception as e:
+                logger.error(f"Ошибка при очистке старых watch'ей: {e}")
+
             logger.info("Определяем сценарий обработки сигнала...")
 
             main_position_open = self.main_position_side is not None
@@ -235,7 +242,7 @@ class HedgingStrategy:
                 logger.error("Цена недоступна, не можем открыть позицию")
                 return
 
-            step7 = OpenNewMainPosition(self.exchange)
+            step7 = OpenNewMainPosition(self.exchange, self.price_stream)
             open_result = await step7.execute(action, current_price)
 
             if open_result.get('success'):
@@ -267,7 +274,7 @@ class HedgingStrategy:
                 logger.error("Цена недоступна, не можем развернуть позицию")
                 return
 
-            step8 = CloseAndReverseMain(self.exchange)
+            step8 = CloseAndReverseMain(self.exchange, self.price_stream)
             reverse_result = await step8.execute(action, current_price)
 
             if reverse_result.get('success'):

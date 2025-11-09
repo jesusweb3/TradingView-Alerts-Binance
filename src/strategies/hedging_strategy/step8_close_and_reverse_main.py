@@ -9,8 +9,9 @@ logger = get_logger(__name__)
 class CloseAndReverseMain:
     """Закрытие старой основной позиции и открытие новой в противоположном направлении"""
 
-    def __init__(self, exchange):
+    def __init__(self, exchange, price_stream):
         self.exchange = exchange
+        self.price_stream = price_stream
         self.symbol = exchange.symbol
 
     async def execute(
@@ -86,6 +87,13 @@ class CloseAndReverseMain:
                 }
 
             logger.info(f"Позиция {old_position_side} x{old_volume} успешно закрыта")
+
+            logger.info("Отменяем все watch'и на старую позицию так как она закрыта")
+            try:
+                self.price_stream.cancel_all_watches()
+                logger.info("Все watch'и на старую позицию отменены")
+            except Exception as e:
+                logger.error(f"Ошибка при отмене watch'ей: {e}")
 
             if current_price is None:
                 logger.error("Цена из WebSocket недоступна для открытия новой позиции")
