@@ -5,17 +5,18 @@ from src.config.manager import config_manager
 from src.strategies.classic_strategy.strategy import ClassicStrategy
 from src.strategies.stop_strategy.strategy import StopStrategy
 from src.strategies.hedging_strategy.strategy import HedgingStrategy
+from src.strategies.take_strategy.strategy import TakeStrategy
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-def create_strategy() -> Union[ClassicStrategy, StopStrategy, HedgingStrategy]:
+def create_strategy() -> Union[ClassicStrategy, StopStrategy, HedgingStrategy, TakeStrategy]:
     """
     Создает экземпляр стратегии на основе конфигурации
 
     Returns:
-        ClassicStrategy, StopStrategy или HedgingStrategy в зависимости от TRADING_STRATEGY
+        ClassicStrategy, StopStrategy, HedgingStrategy или TakeStrategy в зависимости от TRADING_STRATEGY
 
     Raises:
         ValueError: Если указана неподдерживаемая торговая стратегия
@@ -31,5 +32,8 @@ def create_strategy() -> Union[ClassicStrategy, StopStrategy, HedgingStrategy]:
     elif trading_strategy == "hedging":
         logger.info("Создана hedging стратегия")
         return HedgingStrategy()
+    elif trading_strategy == "take":
+        logger.info("Создана take стратегия")
+        return TakeStrategy()
     else:
         raise ValueError(f"Неподдерживаемая торговая стратегия: {trading_strategy}")

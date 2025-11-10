@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from src.strategies.classic_strategy.strategy import ClassicStrategy
     from src.strategies.stop_strategy.strategy import StopStrategy
     from src.strategies.hedging_strategy.strategy import HedgingStrategy
+    from src.strategies.take_strategy.strategy import TakeStrategy
 
 logger = get_logger(__name__)
 
@@ -20,11 +21,11 @@ class HealthMonitor:
     def __init__(self):
         self.is_monitoring = False
         self.monitor_task: Optional[asyncio.Task] = None
-        self.strategy: Optional[Union['ClassicStrategy', 'StopStrategy', 'HedgingStrategy']] = None
+        self.strategy: Optional[Union['ClassicStrategy', 'StopStrategy', 'HedgingStrategy', 'TakeStrategy']] = None
         self.monitoring_interval = 600
         self.initial_delay = 10
 
-    def start_monitoring(self, strategy: Union['ClassicStrategy', 'StopStrategy', 'HedgingStrategy']):
+    def start_monitoring(self, strategy: Union['ClassicStrategy', 'StopStrategy', 'HedgingStrategy', 'TakeStrategy']):
         """Запускает мониторинг в async задаче"""
         if self.is_monitoring:
             return

@@ -140,7 +140,7 @@ class ConfigManager:
         Возвращает выбранную торговую стратегию с валидацией
 
         Returns:
-            'classic', 'stop' или 'hedging'
+            'classic', 'stop', 'hedging' или 'take'
 
         Raises:
             ValueError: Если указана неподдерживаемая стратегия
@@ -152,7 +152,7 @@ class ConfigManager:
             default='classic'
         ).lower()
 
-        valid_strategies = ['classic', 'stop', 'hedging']
+        valid_strategies = ['classic', 'stop', 'hedging', 'take']
 
         if strategy not in valid_strategies:
             raise ValueError(
@@ -232,6 +232,46 @@ class ConfigManager:
         }
 
     @lru_cache(maxsize=1)
+    def get_take_strategy_config(self) -> dict:
+        """Возвращает конфигурацию take стратегии с валидацией"""
+        tp1 = ConfigManager._validate_and_get(
+            'TP1',
+            float,
+            required=True,
+            min_value=0.0
+        )
+
+        qty1 = ConfigManager._validate_and_get(
+            'QTY1',
+            float,
+            required=True,
+            min_value=0.0,
+            max_value=100.0
+        )
+
+        tp2 = ConfigManager._validate_and_get(
+            'TP2',
+            float,
+            required=True,
+            min_value=0.0
+        )
+
+        qty2 = ConfigManager._validate_and_get(
+            'QTY2',
+            float,
+            required=True,
+            min_value=0.0,
+            max_value=100.0
+        )
+
+        return {
+            'tp1': tp1,
+            'qty1': qty1,
+            'tp2': tp2,
+            'qty2': qty2
+        }
+
+    @lru_cache(maxsize=1)
     def get_telegram_config(self) -> dict:
         """Возвращает конфигурацию Telegram с валидацией"""
         bot_token = ConfigManager._validate_and_get('TELEGRAM_BOT_TOKEN', str, required=True)
@@ -260,6 +300,7 @@ class ConfigManager:
         self.get_trading_strategy.cache_clear()
         self.get_trailing_stop_config.cache_clear()
         self.get_hedging_config.cache_clear()
+        self.get_take_strategy_config.cache_clear()
         self.get_telegram_config.cache_clear()
 
 
