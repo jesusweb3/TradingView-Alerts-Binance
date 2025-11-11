@@ -254,11 +254,11 @@ class TakeBinanceClient:
     @retry_on_api_error()
     async def reverse_position_fast(self, symbol: str, total_quantity: float) -> bool:
         """
-        Разворот позиции: закрывает старую + открывает новую одним ордером
+        Разворот позиции: закрывает старую + открывает новую одним ордером (с округлением)
 
         Args:
             symbol: Торговый символ
-            total_quantity: Итоговый объем (уже округленный)
+            total_quantity: Итоговый объем (будет округлен по правилам биржи)
 
         Returns:
             True если успешен, False иначе
@@ -273,15 +273,18 @@ class TakeBinanceClient:
             current_side = current_position['side']
             reverse_side = "SELL" if current_side == "Buy" else "BUY"
 
+            rounded_quantity = self.round_quantity(symbol, total_quantity)
+
             self.logger.info(
-                f"Разворот {symbol}: {current_side} → {reverse_side}, объем {total_quantity}"
+                f"Разворот {symbol}: {current_side} → {reverse_side}, "
+                f"объем {total_quantity} → {rounded_quantity} (после округления)"
             )
 
             await self.client.futures_create_order(
                 symbol=symbol,
                 side=reverse_side,
                 type='MARKET',
-                quantity=total_quantity
+                quantity=rounded_quantity
             )
 
             new_direction = "LONG" if reverse_side == "BUY" else "SHORT"
@@ -296,12 +299,12 @@ class TakeBinanceClient:
     async def place_limit_order_reduce_only(self, symbol: str, side: str, quantity: float,
                                              price: float) -> Optional[Dict[str, Any]]:
         """
-        Размещает лимитный ордер с reduceOnly для TP
+        Размещает лимитный ордер с reduceOnly для TP (с округлением количества)
 
         Args:
             symbol: Торговый символ
             side: 'BUY' или 'SELL'
-            quantity: Количество контрактов
+            quantity: Количество контрактов (будет округлено)
             price: Лимитная цена
 
         Returns:
@@ -309,19 +312,21 @@ class TakeBinanceClient:
         """
         try:
             price_rounded = self.round_price(symbol, price)
+            quantity_rounded = self.round_quantity(symbol, quantity)
 
             result = await self.client.futures_create_order(
                 symbol=symbol,
                 side=side,
                 type='LIMIT',
-                quantity=quantity,
+                quantity=quantity_rounded,
                 price=price_rounded,
                 timeInForce='GTC',
                 reduceOnly=True
             )
 
             self.logger.info(
-                f"Лимитный ордер размещен: {symbol}, side={side}, qty={quantity}, price={price_rounded}"
+                f"Лимитный ордер размещен: {symbol}, side={side}, "
+                f"qty={quantity} → {quantity_rounded}, price={price_rounded}"
             )
             return result
 
@@ -385,6 +390,38 @@ class TakeBinanceClient:
 
         return round(rounded_price, 8)
 
+    def round_quantity(self, symbol: str, quantity: float) -> float:
+        """
+        Округляет количество контрактов по правилам биржи
+
+        Args:
+            symbol: Торговый символ
+            quantity: Количество для округления
+
+        Returns:
+            Округленное количество контрактов
+        """
+        info = self._instruments_info.get(symbol)
+        if not info:
+            self.logger.warning(f"Информация об инструменте {symbol} не загружена, используем fallback")
+            return round(quantity, 3)
+
+        qty_step = info.get('qty_step')
+        min_qty = info.get('min_qty')
+        qty_precision = info.get('qty_precision', 3)
+
+        if qty_step:
+            precision_digits = len(str(qty_step).split('.')[-1]) if '.' in str(qty_step) else 0
+            rounded_value = round(quantity / qty_step) * qty_step
+            rounded_value = round(rounded_value, precision_digits)
+        else:
+            rounded_value = round(quantity, qty_precision)
+
+        if min_qty and rounded_value < min_qty:
+            rounded_value = min_qty
+
+        return rounded_value
+
     def calculate_quantity(self, symbol: str, position_size: float, current_price: float) -> float:
         """
         Вычисляет и округляет количество контрактов для открытия позиции
@@ -400,26 +437,7 @@ class TakeBinanceClient:
         total_value = position_size * self.leverage
         raw_quantity = total_value / current_price
 
-        info = self._instruments_info.get(symbol)
-        if not info:
-            self.logger.warning(f"Информация об инструменте {symbol} не загружена, используем fallback")
-            return round(raw_quantity, 3)
-
-        qty_step = info.get('qty_step')
-        min_qty = info.get('min_qty')
-        qty_precision = info.get('qty_precision', 3)
-
-        if qty_step:
-            precision_digits = len(str(qty_step).split('.')[-1]) if '.' in str(qty_step) else 0
-            rounded_value = round(raw_quantity / qty_step) * qty_step
-            rounded_value = round(rounded_value, precision_digits)
-        else:
-            rounded_value = round(raw_quantity, qty_precision)
-
-        if min_qty and rounded_value < min_qty:
-            rounded_value = min_qty
-
-        return rounded_value
+        return self.round_quantity(symbol, raw_quantity)
 
     def calculate_tp_levels(self, entry_price: float, tp1_percent: float, tp2_percent: float,
                             side: str) -> Tuple[float, float]:
@@ -483,22 +501,8 @@ class TakeBinanceClient:
         qty1_raw = total_quantity * (qty1_percent / 100)
         qty2_raw = total_quantity * (qty2_percent / 100)
 
-        info = self._instruments_info.get(symbol)
-        if not info:
-            return round(qty1_raw, 3), round(qty2_raw, 3)
-
-        qty_step = info.get('qty_step')
-        qty_precision = info.get('qty_precision', 3)
-
-        def round_qty(qty):
-            if qty_step:
-                precision_digits = len(str(qty_step).split('.')[-1]) if '.' in str(qty_step) else 0
-                return round(round(qty / qty_step) * qty_step, precision_digits)
-            else:
-                return round(qty, qty_precision)
-
-        qty1 = round_qty(qty1_raw)
-        qty2 = round_qty(qty2_raw)
+        qty1 = self.round_quantity(symbol, qty1_raw)
+        qty2 = self.round_quantity(symbol, qty2_raw)
 
         return qty1, qty2
 
