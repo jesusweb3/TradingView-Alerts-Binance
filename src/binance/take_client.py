@@ -424,35 +424,42 @@ class TakeBinanceClient:
     def calculate_tp_levels(self, entry_price: float, tp1_percent: float, tp2_percent: float,
                             side: str) -> Tuple[float, float]:
         """
-        Рассчитывает два уровня TP для take стратегии
+        Рассчитывает два уровня TP через ROI/Leverage
 
-        Параметры TP уже содержат эффект плеча в конфиге.
-        Формула (простая):
-        LONG:  tp_level = entry_price * (1 + tp_percent / 100)
-        SHORT: tp_level = entry_price * (1 - tp_percent / 100)
+        Формула:
+        movement_percent = tp_percent / leverage
+        tp_price = entry_price * (1 ± movement_percent/100)
 
-        Примеры (leverage=50):
-        LONG: entry=3537, tp1=2%
-          tp1_level = 3537 * (1 + 2/100) = 3537 * 1.02 = 3607.74 ✓
+        Примеры (entry=4000, leverage=5):
+        LONG, tp1=2%:
+          movement = 2 / 5 = 0.4%
+          tp1 = 4000 * (1 + 0.4/100) = 4000 * 1.004 = 4016 ✓
 
-        SHORT: entry=3537, tp1=2%
-          tp1_level = 3537 * (1 - 2/100) = 3537 * 0.98 = 3466.26 ✓
+        LONG, tp2=2.3%:
+          movement = 2.3 / 5 = 0.46%
+          tp2 = 4000 * (1 + 0.46/100) = 4000 * 1.0046 = 4018.4 ✓
+
+        SHORT, tp1=2%:
+          tp1 = 4000 * (1 - 0.4/100) = 4000 * 0.996 = 3984 ✓
 
         Args:
             entry_price: Цена входа
-            tp1_percent: TP1 процент PNL (например 2)
-            tp2_percent: TP2 процент PNL (например 2.3)
+            tp1_percent: TP1 процент ROI (например 2)
+            tp2_percent: TP2 процент ROI (например 2.3)
             side: 'Buy' или 'Sell'
 
         Returns:
             (tp1_level, tp2_level) - оба округлены по правилам биржи
         """
+        movement_percent_tp1 = tp1_percent / self.leverage
+        movement_percent_tp2 = tp2_percent / self.leverage
+
         if side == 'Buy':
-            tp1_level = entry_price * (1 + tp1_percent / 100)
-            tp2_level = entry_price * (1 + tp2_percent / 100)
+            tp1_level = entry_price * (1 + movement_percent_tp1 / 100)
+            tp2_level = entry_price * (1 + movement_percent_tp2 / 100)
         else:  # Sell
-            tp1_level = entry_price * (1 - tp1_percent / 100)
-            tp2_level = entry_price * (1 - tp2_percent / 100)
+            tp1_level = entry_price * (1 - movement_percent_tp1 / 100)
+            tp2_level = entry_price * (1 - movement_percent_tp2 / 100)
 
         tp1_level = self.round_price(self.symbol, tp1_level)
         tp2_level = self.round_price(self.symbol, tp2_level)

@@ -1,7 +1,7 @@
 # src/strategies/take_strategy/strategy.py
 
 import asyncio
-from typing import Optional, Literal, Tuple
+from typing import Optional, Literal
 from src.utils.logger import get_logger
 from src.config.manager import config_manager
 from src.binance.take_client import TakeBinanceClient
@@ -230,9 +230,10 @@ class TakeStrategy:
             logger.info("Позиция уже открыта - готовимся к развороту")
 
             old_side = current_position['side']
-            old_quantity = current_position['size']
+            actual_remaining_size = current_position['size']
 
-            logger.info(f"Старая позиция: {old_side} x{old_quantity}")
+            logger.info(f"Старая позиция: {old_side} x{actual_remaining_size}")
+            logger.info("(актуальное значение из биржи, может измениться после сработавших TP)")
 
             logger.info("Отменяем все старые TP ордера перед разворотом")
             cancel_success = await self.exchange.cancel_all_limit_orders(self.symbol)
@@ -251,16 +252,12 @@ class TakeStrategy:
 
             new_quantity = self.exchange.calculate_quantity(self.symbol, position_size, current_price)
 
-            if self.last_quantity is None:
-                logger.warning("last_quantity не установлен, используем только новый объем")
-                total_quantity = new_quantity * 2
-            else:
-                total_quantity = self.last_quantity + new_quantity
-
             logger.info(
-                f"Разворот: предыдущий объем {self.last_quantity}, "
-                f"новый объем {new_quantity}, итого {total_quantity}"
+                f"Разворот: осталось в позиции {actual_remaining_size} контрактов, "
+                f"новый объем {new_quantity}, итого для разворота {actual_remaining_size + new_quantity}"
             )
+
+            total_quantity = actual_remaining_size + new_quantity
 
             success = await self.exchange.reverse_position_fast(self.symbol, total_quantity)
 
@@ -279,7 +276,7 @@ class TakeStrategy:
             logger.info(f"Новый TVX получен: ${entry_price:.2f}")
 
             new_side = "Buy" if action == "buy" else "Sell"
-            await self._place_tp_orders(entry_price, total_quantity, new_side)
+            await self._place_tp_orders(entry_price, total_quantity, new_side, new_quantity=new_quantity)
 
             return True
 
@@ -288,13 +285,24 @@ class TakeStrategy:
             return False
 
     async def _place_tp_orders(self, entry_price: float, total_quantity: float,
-                               position_side: str) -> bool:
-        """Рассчитывает и выставляет два TP лимитных ордера"""
+                               position_side: str, new_quantity: Optional[float] = None) -> bool:
+        """
+        Рассчитывает и выставляет два TP лимитных ордера
+
+        Args:
+            entry_price: Цена входа
+            total_quantity: Общий объем для разворота на бирже (в т.ч. старая позиция)
+            position_side: 'Buy' или 'Sell'
+            new_quantity: Объем именно НОВОЙ позиции (для расчета TP процентов).
+                         Если None - используется total_quantity
+        """
         try:
-            logger.info(
-                f"Рассчитываем TP уровни: entry=${entry_price:.2f}, "
-                f"qty={total_quantity}, side={position_side}"
-            )
+            qty_for_tp_calculation = new_quantity if new_quantity is not None else total_quantity
+
+            logger.info(f"=== РАСЧЕТ TP ОРДЕРОВ ===")
+            logger.info(f"Параметры: entry=${entry_price:.8f}, side={position_side}")
+            logger.info(f"  total_qty (на разворот) = {total_quantity}")
+            logger.info(f"  qty_for_tp_calc (для процентов) = {qty_for_tp_calculation}")
 
             tp1_level, tp2_level = self.exchange.calculate_tp_levels(
                 entry_price=entry_price,
@@ -303,20 +311,24 @@ class TakeStrategy:
                 side=position_side
             )
 
-            logger.info(f"TP уровни рассчитаны: TP1=${tp1_level:.2f}, TP2=${tp2_level:.2f}")
+            logger.info(f"TP цены: TP1=${tp1_level:.8f}, TP2=${tp2_level:.8f}")
 
             qty1, qty2 = self.exchange.calculate_tp_quantities(
-                total_quantity=total_quantity,
+                total_quantity=qty_for_tp_calculation,
                 qty1_percent=self.qty1_percent,
                 qty2_percent=self.qty2_percent,
                 symbol=self.symbol
             )
 
-            logger.info(f"TP количества рассчитаны: qty1={qty1}, qty2={qty2}")
+            logger.info(f"TP количества (считаны от {qty_for_tp_calculation}):")
+            logger.info(f"  qty1_raw = {qty_for_tp_calculation} * ({self.qty1_percent} / 100) = {qty_for_tp_calculation * (self.qty1_percent / 100):.8f}")
+            logger.info(f"  qty1 (после округления) = {qty1}")
+            logger.info(f"  qty2_raw = {qty_for_tp_calculation} * ({self.qty2_percent} / 100) = {qty_for_tp_calculation * (self.qty2_percent / 100):.8f}")
+            logger.info(f"  qty2 (после округления) = {qty2}")
 
             close_side = "SELL" if position_side == "Buy" else "BUY"
 
-            logger.info(f"Выставляем TP1: side={close_side}, qty={qty1}, price=${tp1_level:.2f}")
+            logger.info(f"Выставляем TP1: {close_side} {qty1} @ ${tp1_level:.8f}")
 
             result1 = await self.exchange.place_limit_order_reduce_only(
                 symbol=self.symbol,
@@ -329,9 +341,9 @@ class TakeStrategy:
                 logger.error("Не удалось выставить TP1 ордер")
                 return False
 
-            logger.info(f"TP1 ордер выставлен успешно")
+            logger.info(f"✓ TP1 ордер выставлен")
 
-            logger.info(f"Выставляем TP2: side={close_side}, qty={qty2}, price=${tp2_level:.2f}")
+            logger.info(f"Выставляем TP2: {close_side} {qty2} @ ${tp2_level:.8f}")
 
             result2 = await self.exchange.place_limit_order_reduce_only(
                 symbol=self.symbol,
@@ -344,11 +356,12 @@ class TakeStrategy:
                 logger.error("Не удалось выставить TP2 ордер")
                 return False
 
-            logger.info(f"TP2 ордер выставлен успешно")
+            logger.info(f"✓ TP2 ордер выставлен")
 
             logger.info(
-                f"Оба TP ордера выставлены: "
-                f"TP1=${tp1_level:.2f} x{qty1}, TP2=${tp2_level:.2f} x{qty2}"
+                f"=== ОБА TP ОРДЕРА ВЫСТАВЛЕНЫ ===\n"
+                f"TP1: {close_side} {qty1} @ ${tp1_level:.8f}\n"
+                f"TP2: {close_side} {qty2} @ ${tp2_level:.8f}\n"
             )
 
             return True
